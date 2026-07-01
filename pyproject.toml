@@ -1,0 +1,17 @@
+[project]
+name = "web-agent"
+version = "0.1.0"
+description = "Web Agent Project"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.115.0",
+    "playwright>=1.61.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
