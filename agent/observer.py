@@ -4,10 +4,16 @@
 避免整页 DOM/HTML 撑爆 prompt，同时保留截图供人工排查。
 """
 
+import logging
+
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError
 from agent.tracer import TraceLogger
 from agent.types import Element, ObserveResult
+
+logger = logging.getLogger(__name__)
 
 # 提取可见文本：过滤 script/style/noscript 等不可见节点，
 # 按文档流顺序拼接可见文本节点，交给 Python 侧再做长度截断。
@@ -158,15 +164,19 @@ class BrowserStateObserver:
             await page.wait_for_load_state(
                 "networkidle", timeout=self.config.browser_timeout
             )
-        except Exception as exc:
+        except PlaywrightTimeoutError as exc:
             # networkidle 超时不应直接判为致命错误（长轮询/SSE 页面永远不会 idle），
-            # 降级继续采集，但记录到 BrowserError 供上层按需处理/忽略。
-            fallback_error = BrowserError(
-                "等待 networkidle 超时，降级继续采集当前 DOM 状态",
-                action="wait_for_load_state",
-                timeout_ms=self.config.browser_timeout,
+            # 降级继续采集，仅记录一条 warning 供排查，不中断流程。
+            logger.warning(
+                "等待 networkidle 超时（timeout_ms=%d），降级继续采集当前 DOM 状态: %s",
+                self.config.browser_timeout,
+                BrowserError(
+                    "等待 networkidle 超时，降级继续采集当前 DOM 状态",
+                    action="wait_for_load_state",
+                    timeout_ms=self.config.browser_timeout,
+                ),
+                exc_info=exc,
             )
-            _ = fallback_error  # 仅记录语义，不中断流程
 
         url = page.url
         title = await page.title()
