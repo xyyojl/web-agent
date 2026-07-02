@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 @dataclass
 class AgentConfig:
-    model:            str   = "claude-sonnet-4-6"
+    model:            str   = "glm-4.7-flash"
     max_steps:        int   = 15
     max_fail:         int   = 3
     step_delay:       float = 0.5
