@@ -7,6 +7,7 @@
   决定是否终止任务 —— 这是刻意设计，安全拦截不应被静默吞掉。
 """
 
+import asyncio
 import json
 import os
 import re
@@ -209,23 +210,25 @@ async def browser_type(page, selector: str, text: str) -> ToolResult:
     return ToolResult(success=True, page_changed=False, output=selector, error_msg=None)
 
 
-# 复用单一客户端实例，避免每次调用都重新建立连接池
-_client: anthropic.Anthropic | None = None
+# 复用单一客户端实例，避免每次调用都重新建立连接池。
+# 使用 AsyncAnthropic 而非同步 Anthropic：browser_extract 运行在 asyncio 事件循环中，
+# 若用同步客户端发起网络请求，会阻塞整个事件循环，导致其他并发协程（如浏览器 I/O）卡住。
+_client: anthropic.AsyncAnthropic | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise LLMError("未配置 ANTHROPIC_API_KEY，无法调用 LLM 抽取", stage="request")
-        _client = anthropic.Anthropic(api_key=api_key)
+        _client = anthropic.AsyncAnthropic(api_key=api_key)
     assert _client is not None  # 帮助静态类型检查器收窄为非 Optional
     return _client
 
 
-def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None = None) -> str:
-    """调用 Anthropic Messages API（官方 SDK），返回模型原始文本输出。
+async def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None = None) -> str:
+    """调用 Anthropic Messages API（官方 SDK，异步客户端），返回模型原始文本输出。
 
     独立为模块级函数（而非内嵌在 browser_extract 中）便于测试时替换/打桩。
     SDK 自带超时与网络层重试，这里在其上再叠加一层业务级重试（config.llm_retry），
@@ -246,7 +249,7 @@ def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None = Non
             # 根据重载签名正确推断出非流式返回类型 Message，而不是
             # Message | Stream[...] 联合类型；system 未提供时传 NOT_GIVEN 哨兵值
             # （而不是省略该参数），同样是为了保持这是一次静态可解析的直接调用。
-            message: Message = client.messages.create(
+            message: Message = await client.messages.create(
                 model=config.model,
                 max_tokens=1024,
                 timeout=config.llm_timeout,
@@ -289,7 +292,7 @@ async def browser_extract(
     )
 
     try:
-        raw_output = _call_llm_extract(prompt, config, system=EXTRACTOR_SYSTEM)
+        raw_output = await _call_llm_extract(prompt, config, system=EXTRACTOR_SYSTEM)
     except LLMError as exc:
         return ToolResult(success=False, page_changed=False, output=None, error_msg=exc.message)
     except Exception as exc:
@@ -364,18 +367,27 @@ async def browser_screenshot(page, tracer: TraceLogger) -> ToolResult:
 
 
 async def ask_human(reason: str, options: list[str]) -> str:
-    """终端打印提示，阻塞等待用户从 options 中选择一项并返回选择结果。"""
-    print("\n[需要人工确认]")
-    print(f"原因: {reason}")
-    for idx, opt in enumerate(options, start=1):
-        print(f"  {idx}. {opt}")
+    """终端打印提示，阻塞等待用户从 options 中选择一项并返回选择结果。
 
-    while True:
-        raw = input(f"请输入选项编号 (1-{len(options)}) 或直接输入选项文本: ").strip()
-        if raw in options:
-            return raw
-        if raw.isdigit():
-            idx = int(raw)
-            if 1 <= idx <= len(options):
-                return options[idx - 1]
-        print("输入无效，请重新输入。")
+    input() 本身是同步阻塞调用，会独占整个事件循环；
+    用 asyncio.to_thread 丢到线程池执行，让事件循环在等待用户输入期间
+    仍可调度其他协程（如浏览器侧的后台任务）。
+    """
+
+    def _prompt_blocking() -> str:
+        print("\n[需要人工确认]")
+        print(f"原因: {reason}")
+        for idx, opt in enumerate(options, start=1):
+            print(f"  {idx}. {opt}")
+
+        while True:
+            raw = input(f"请输入选项编号 (1-{len(options)}) 或直接输入选项文本: ").strip()
+            if raw in options:
+                return raw
+            if raw.isdigit():
+                idx = int(raw)
+                if 1 <= idx <= len(options):
+                    return options[idx - 1]
+            print("输入无效，请重新输入。")
+
+    return await asyncio.to_thread(_prompt_blocking)
