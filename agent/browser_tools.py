@@ -20,6 +20,7 @@ from playwright.async_api import Error as PlaywrightError
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError, LLMError, SafetyError
 from agent.observer import BrowserStateObserver
+from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL
 from agent.tracer import TraceLogger
 from agent.types import ObserveResult, ToolResult
 
@@ -223,12 +224,16 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-def _call_llm_extract(prompt: str, config: AgentConfig) -> str:
+def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None = None) -> str:
     """调用 Anthropic Messages API（官方 SDK），返回模型原始文本输出。
 
     独立为模块级函数（而非内嵌在 browser_extract 中）便于测试时替换/打桩。
     SDK 自带超时与网络层重试，这里在其上再叠加一层业务级重试（config.llm_retry），
     用于覆盖偶发的可重试错误。
+
+    system: 角色约束（如 agent.prompts.EXTRACTOR_SYSTEM），通过 Anthropic
+        Messages API 的 system 参数单独传递，不与用户消息拼在一起，
+        便于角色指令被模型稳定遵循，也便于不同调用方复用同一份 prompt 定义。
     """
     client = _get_client()
 
@@ -237,12 +242,15 @@ def _call_llm_extract(prompt: str, config: AgentConfig) -> str:
     last_exc: Exception | None = None
     for _ in range(max(1, config.llm_retry)):
         try:
-            # 未传 stream 参数即为非流式调用，返回类型固定为 Message；
-            # 显式标注帮助静态类型检查器排除 Stream[...] 分支。
+            # 直接以关键字参数调用（而非 **kwargs 拼装 dict），才能让类型检查器
+            # 根据重载签名正确推断出非流式返回类型 Message，而不是
+            # Message | Stream[...] 联合类型；system 未提供时传 NOT_GIVEN 哨兵值
+            # （而不是省略该参数），同样是为了保持这是一次静态可解析的直接调用。
             message: Message = client.messages.create(
                 model=config.model,
                 max_tokens=1024,
                 timeout=config.llm_timeout,
+                system=system if system else anthropic.NOT_GIVEN,
                 messages=messages,
             )
         except anthropic.APIError as exc:
@@ -274,15 +282,14 @@ async def browser_extract(
             error_msg=f"观察页面失败，无法抽取: {exc}",
         )
 
-    prompt = (
-        "请严格按照要求，仅输出一个 JSON 对象，不要包含任何解释文字或 Markdown 代码块标记。\n"
-        f"抽取要求: {instruction}\n"
-        f"页面标题: {obs['title']}\n"
-        f"页面可见文本: {obs['visible_text_summary']}\n"
+    prompt = EXTRACTOR_USER_TMPL.format(
+        instruction=instruction,
+        title=obs["title"],
+        visible_text_summary=obs["visible_text_summary"],
     )
 
     try:
-        raw_output = _call_llm_extract(prompt, config)
+        raw_output = _call_llm_extract(prompt, config, system=EXTRACTOR_SYSTEM)
     except LLMError as exc:
         return ToolResult(success=False, page_changed=False, output=None, error_msg=exc.message)
     except Exception as exc:
