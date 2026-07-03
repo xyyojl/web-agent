@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>产品介绍 - Tab 导航</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #222; }
+  .tab-bar { display: flex; gap: 8px; border-bottom: 2px solid #e0e0e0; }
+  .tab-btn {
+    padding: 10px 20px; border: none; background: none; cursor: pointer;
+    font-size: 16px; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .tab-btn.active { color: #1a73e8; border-bottom-color: #1a73e8; font-weight: bold; }
+  .tab-panel { display: none; padding: 20px 4px; }
+  .tab-panel.active { display: block; }
+</style>
+</head>
+<body>
+  <h1>WebAgent 产品介绍</h1>
+
+  <div class="tab-bar" role="tablist">
+    <button class="tab-btn active" data-tab="overview" type="button">Overview</button>
+    <button class="tab-btn" data-tab="features" type="button">Features</button>
+    <button class="tab-btn" data-tab="docs" type="button">Docs</button>
+  </div>
+
+  <div class="tab-panel active" id="panel-overview">
+    <p>WebAgent 是一个专注于浏览器自动化的智能体框架，帮助开发者快速构建可靠的 Web 任务执行流程。</p>
+  </div>
+  <div class="tab-panel" id="panel-features">
+    <ul>
+      <li>结构化页面观察，不传完整 HTML</li>
+      <li>三级降级的元素定位策略</li>
+      <li>内置敏感字段安全拦截</li>
+    </ul>
+  </div>
+  <div class="tab-panel" id="panel-docs">
+    <p>完整文档请参阅 Quickstart 与 API Reference 章节。</p>
+  </div>
+
+  <script>
+    // 纯前端 Tab 切换，不依赖任何后端接口或本地存储；
+    // 每次刷新页面都从固定的初始状态（Overview 激活）重新开始，保证 eval 可复现。
+    document.querySelectorAll('.tab-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const target = btn.getAttribute('data-tab');
+
+        document.querySelectorAll('.tab-btn').forEach(function (b) {
+          b.classList.toggle('active', b === btn);
+        });
+        document.querySelectorAll('.tab-panel').forEach(function (panel) {
+          panel.classList.toggle('active', panel.id === 'panel-' + target);
+        });
+      });
+    });
+  </script>
+</body>
+</html>

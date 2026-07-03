@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>用户信息 - 表单填写</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; color: #222; }
+  label { display: block; margin-top: 16px; margin-bottom: 4px; font-weight: bold; }
+  input, select { width: 100%; padding: 8px 10px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+  button { margin-top: 20px; padding: 10px 20px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  #result { margin-top: 20px; padding: 12px; background: #e6f4ea; color: #1a7f37; border-radius: 4px; display: none; }
+</style>
+</head>
+<body>
+  <h1>用户信息登记</h1>
+
+  <!-- action 指向 javascript:void(0)，配合 submit 事件 preventDefault，避免真实网络提交 -->
+  <form id="user-form" action="javascript:void(0);" method="post">
+    <label for="name">姓名</label>
+    <input type="text" id="name" name="name" placeholder="请输入姓名" />
+
+    <label for="city">城市</label>
+    <input type="text" id="city" name="city" placeholder="请输入城市" />
+
+    <label for="language">语言</label>
+    <select id="language" name="language">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+      <option value="ja">日本語</option>
+    </select>
+
+    <button type="submit">Submit</button>
+  </form>
+
+  <div id="result"></div>
+
+  <script>
+    // 仅在前端展示已提交的字段，不发起任何网络请求，保证 eval 环境无副作用、可重复执行。
+    document.getElementById('user-form').addEventListener('submit', function (event) {
+      event.preventDefault();
+
+      const name = document.getElementById('name').value;
+      const city = document.getElementById('city').value;
+      const language = document.getElementById('language').value;
+
+      const result = document.getElementById('result');
+      result.textContent = '已提交：姓名=' + name + '，城市=' + city + '，语言=' + language;
+      result.style.display = 'block';
+    });
+  </script>
+</body>
+</html>

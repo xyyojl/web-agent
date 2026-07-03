@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>跳转示例 - 起始页</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; color: #222; }
+  button { padding: 10px 20px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+</style>
+</head>
+<body>
+  <h1>跳转示例</h1>
+  <p>点击下方按钮将跳转到目标页面。</p>
+
+  <!-- 用真实的页面跳转（location.href）而非 fetch/ajax，
+       确保 Playwright 能观察到 page.url 的变化，用于验证 L10 是否跳转成功。 -->
+  <button id="go-btn" type="button">前往目标页</button>
+
+  <script>
+    document.getElementById('go-btn').addEventListener('click', function () {
+      window.location.href = 'redirect_target.html';
+    });
+  </script>
+</body>
+</html>

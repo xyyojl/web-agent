@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>操作确认 - 按钮状态</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; color: #222; }
+  button { padding: 10px 20px; margin-right: 12px; border-radius: 4px; font-size: 14px; cursor: pointer; }
+  #confirm-btn { background: #1a73e8; color: #fff; border: none; }
+  #locked-btn { background: #e0e0e0; color: #999; border: none; cursor: not-allowed; }
+  #status { margin-top: 20px; padding: 12px; background: #e6f4ea; color: #1a7f37; border-radius: 4px; display: none; }
+</style>
+</head>
+<body>
+  <h1>操作确认</h1>
+  <p>审批人尚未签署，"锁定操作"按钮当前处于禁用状态，仅可执行"确认"操作。</p>
+
+  <button id="confirm-btn" type="button">确认</button>
+  <button id="locked-btn" type="button" disabled>锁定操作</button>
+
+  <div id="status"></div>
+
+  <script>
+    // 正常按钮可点击并给出反馈；disabled 按钮天然不可交互，不额外绑定事件。
+    document.getElementById('confirm-btn').addEventListener('click', function () {
+      const status = document.getElementById('status');
+      status.textContent = '已确认操作';
+      status.style.display = 'block';
+    });
+  </script>
+</body>
+</html>

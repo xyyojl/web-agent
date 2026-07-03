@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>常见问题 - 折叠面板</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #222; }
+  .accordion-item { border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 8px; overflow: hidden; }
+  .accordion-header {
+    width: 100%; text-align: left; padding: 14px 16px; background: #fafafa;
+    border: none; cursor: pointer; font-size: 15px; font-weight: bold; color: #222;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .accordion-header::after { content: "+"; font-weight: normal; }
+  .accordion-header.open::after { content: "\2212"; }
+  .accordion-body { display: none; padding: 14px 16px; border-top: 1px solid #e0e0e0; }
+  .accordion-body.open { display: block; }
+</style>
+</head>
+<body>
+  <h1>常见问题</h1>
+
+  <div class="accordion-item">
+    <button class="accordion-header" type="button" data-target="body-1">如何安装 WebAgent？</button>
+    <div class="accordion-body" id="body-1">
+      通过 <code>pip install webagent</code> 即可完成安装，无需额外配置。
+    </div>
+  </div>
+
+  <div class="accordion-item">
+    <button class="accordion-header" type="button" data-target="body-2">支持哪些浏览器？</button>
+    <div class="accordion-body" id="body-2">
+      基于 Playwright 实现，支持 Chromium、Firefox 和 WebKit 三种引擎。
+    </div>
+  </div>
+
+  <div class="accordion-item">
+    <button class="accordion-header" type="button" data-target="body-3">是否支持异步任务？</button>
+    <div class="accordion-body" id="body-3">
+      支持异步执行。WebAgent 的核心执行循环基于 asyncio 构建，所有浏览器操作均为异步接口。
+    </div>
+  </div>
+
+  <div class="accordion-item">
+    <button class="accordion-header" type="button" data-target="body-4">如何获取技术支持？</button>
+    <div class="accordion-body" id="body-4">
+      请通过项目仓库的 Issue 页面提交问题，或查阅完整文档。
+    </div>
+  </div>
+
+  <script>
+    // 纯前端折叠/展开，初始状态全部收起，不依赖本地存储，刷新后状态重置。
+    document.querySelectorAll('.accordion-header').forEach(function (header) {
+      header.addEventListener('click', function () {
+        const body = document.getElementById(header.getAttribute('data-target'));
+        const isOpen = header.classList.toggle('open');
+        body.classList.toggle('open', isOpen);
+      });
+    });
+  </script>
+</body>
+</html>
