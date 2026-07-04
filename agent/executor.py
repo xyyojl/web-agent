@@ -30,19 +30,20 @@ _KNOWN_ACTIONS = ("click", "type", "scroll", "extract", "screenshot", "done")
 class PlaywrightExecutor:
     """执行层：一个实例对应一次任务 run 的完整 Playwright 生命周期。
 
-    tracer/observer 由 config.trace_dir 内部惰性创建（而不是要求调用方
-    另外传入），这样 __init__ 签名保持与 EXEC-001 规格一致（只吃 config），
-    同时 screenshot/extract 两个动作天然可用；self.tracer 对外公开，
-    agent loop 结束后仍可用它调用 write_report()。
+    tracer 支持从外部注入（CTRL-001 中 AgentController 会把自己持有的
+    TraceLogger 传进来，让 observer 的截图、executor.execute() 里的
+    screenshot/extract 分发、以及 controller 自己的 tracer.record() 全部
+    落在同一个 traces/run-xxx/ 目录、截图编号连续）；不传时退化为独立
+    创建一个新的 TraceLogger，保持 EXEC-001 单独使用场景下的原有行为。
     """
 
-    def __init__(self, config: AgentConfig) -> None:
+    def __init__(self, config: AgentConfig, tracer: TraceLogger | None = None) -> None:
         self.config = config
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self.page: Page | None = None
 
-        self.tracer = TraceLogger(base_dir=config.trace_dir)
+        self.tracer = tracer if tracer is not None else TraceLogger(base_dir=config.trace_dir)
         self.observer = BrowserStateObserver(config, self.tracer)
 
     async def open(self, url: str) -> ToolResult:
