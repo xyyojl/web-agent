@@ -146,8 +146,9 @@ class WebPlanner:
 
             return plan_text
 
+        last_exc_desc = last_exc.message if isinstance(last_exc, LLMError) else str(last_exc)
         raise LLMError(
-            f"WebPlanner LLM 请求连续失败 {max_attempts} 次: {last_exc}",
+            f"WebPlanner LLM 请求连续失败 {max_attempts} 次: {last_exc_desc}",
             stage="request",
             retry_count=max_attempts,
         )
