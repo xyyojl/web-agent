@@ -1,0 +1,10 @@
+{
+  "id": "L05",
+  "type": "local",
+  "task_type": "填写表单+提交",
+  "task": "在表单中填写姓名为「张三」、城市为「上海」，语言下拉框保持默认「中文」，然后点击 Submit 按钮，确认提交结果",
+  "url": "http://localhost:8080/form_fill.html",
+  "expected_output": "页面在提交后应显示确认信息，包含已提交的姓名张三、城市上海，以及语言代码 zh",
+  "verify_mode": "llm_judge",
+  "difficulty": "medium"
+}

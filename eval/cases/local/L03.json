@@ -1,0 +1,10 @@
+{
+  "id": "L03",
+  "type": "local",
+  "task_type": "Tab切换+读内容",
+  "task": "点击 Features 标签页，返回该标签页下显示的第一条列表项的完整文字",
+  "url": "http://localhost:8080/tab_nav.html",
+  "expected_output": "结构化页面观察，不传完整 HTML",
+  "verify_mode": "exact",
+  "difficulty": "low"
+}

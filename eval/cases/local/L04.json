@@ -1,0 +1,10 @@
+{
+  "id": "L04",
+  "type": "local",
+  "task_type": "手风琴展开+读内容",
+  "task": "展开「是否支持异步任务？」这个折叠项，返回展开后显示的完整内容文字",
+  "url": "http://localhost:8080/accordion.html",
+  "expected_output": "支持异步执行",
+  "verify_mode": "contains",
+  "difficulty": "medium"
+}

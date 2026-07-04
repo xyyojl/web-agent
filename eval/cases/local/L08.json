@@ -1,0 +1,23 @@
+{
+  "id": "L08",
+  "type": "local",
+  "task_type": "抽取所有链接",
+  "task": "抽取页面上所有链接的文本与 href，以 JSON 数组格式返回，数组长度应为 10",
+  "url": "http://localhost:8080/links_page.html",
+  "expected_output": {
+    "links": [
+      {"text": "Quickstart 文档", "href": "text_find.html"},
+      {"text": "产品介绍", "href": "tab_nav.html"},
+      {"text": "常见问题", "href": "accordion.html"},
+      {"text": "用户信息登记", "href": "form_fill.html"},
+      {"text": "本周排行榜", "href": "table_extract.html"},
+      {"text": "操作确认页", "href": "disabled_btn.html"},
+      {"text": "跳转示例", "href": "redirect.html"},
+      {"text": "GitHub 组织主页", "href": "https://github.com/anthropics"},
+      {"text": "API 参考文档", "href": "https://docs.anthropic.com"},
+      {"text": "关于 Anthropic", "href": "https://www.anthropic.com"}
+    ]
+  },
+  "verify_mode": "json_schema",
+  "difficulty": "high"
+}

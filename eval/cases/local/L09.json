@@ -1,0 +1,10 @@
+{
+  "id": "L09",
+  "type": "local",
+  "task_type": "disabled按钮处理",
+  "task": "识别页面上哪个按钮处于禁用（disabled）状态、哪个可以点击，点击可用的确认按钮完成操作，并说明为什么没有点击另一个按钮",
+  "url": "http://localhost:8080/disabled_btn.html",
+  "expected_output": "「锁定操作」按钮处于禁用状态无法点击；「确认」按钮可点击，点击后页面显示已确认操作的提示",
+  "verify_mode": "llm_judge",
+  "difficulty": "medium"
+}

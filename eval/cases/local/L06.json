@@ -1,0 +1,10 @@
+{
+  "id": "L06",
+  "type": "local",
+  "task_type": "下拉框选择语言",
+  "task": "打开表单页面，将语言下拉框切换为 English，点击 Submit，返回提交结果文字中显示的语言部分",
+  "url": "http://localhost:8080/form_fill.html",
+  "expected_output": "语言=en",
+  "verify_mode": "contains",
+  "difficulty": "medium"
+}

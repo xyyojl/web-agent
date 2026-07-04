@@ -1,0 +1,10 @@
+{
+  "id": "L10",
+  "type": "local",
+  "task_type": "页面跳转后完成任务",
+  "task": "点击「前往目标页」按钮完成页面跳转，返回跳转后目标页面上显示的提示文字",
+  "url": "http://localhost:8080/redirect.html",
+  "expected_output": "跳转成功",
+  "verify_mode": "contains",
+  "difficulty": "low"
+}
