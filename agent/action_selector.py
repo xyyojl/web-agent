@@ -28,7 +28,7 @@ from agent.types import LLMAction, ObserveResult
 
 logger = logging.getLogger(__name__)
 
-_VALID_ACTIONS = ("click", "type", "scroll", "extract", "screenshot", "done")
+_VALID_ACTIONS = ("click", "type", "scroll", "extract", "screenshot", "select", "done")
 
 
 def _format_observation(obs: ObserveResult) -> str:
@@ -93,7 +93,7 @@ def _build_llm_action(tool_use: ToolUseBlock) -> LLMAction:
     if name not in _VALID_ACTIONS:
         raise ValueError(f"未知的 tool 名称: {name!r}")
     action = cast(
-        Literal["click", "type", "scroll", "extract", "screenshot", "done"], name
+        Literal["click", "type", "scroll", "extract", "screenshot", "select", "done"], name
     )
 
     raw_input = tool_use.input
@@ -130,6 +130,13 @@ def _build_llm_action(tool_use: ToolUseBlock) -> LLMAction:
         if not instruction:
             raise ValueError("[extract] 缺少必填的 instruction 字段")
         value = instruction
+    elif action == "select":
+        selector = _get_str_field(raw_input, "selector")
+        value = _get_str_field(raw_input, "value")
+        if not selector:
+            raise ValueError("[select] 缺少必填的 selector 字段")
+        if not value:
+            raise ValueError("[select] 缺少必填的 value 字段")
     elif action == "done":
         done_value = _get_str_field(raw_input, "value")
         if not done_value:
@@ -154,7 +161,7 @@ class ActionSelector:
                 raise LLMError(
                     "未配置 ANTHROPIC_API_KEY，无法调用 ActionSelector", stage="request"
                 )
-            self._client = anthropic.AsyncAnthropic(api_key=api_key)
+            self._client = anthropic.AsyncAnthropic()
         assert self._client is not None  # 帮助静态类型检查器收窄为非 Optional
         return self._client
 
@@ -201,6 +208,21 @@ class ActionSelector:
                     tool_choice=tool_choice,
                     messages=messages,
                 )
+            except anthropic.RateLimitError as exc:
+                # 429 速率限制：免费模型速率窗口通常为 1 分钟，
+                # 短时间指数退避反而加剧频率压力，改用固定的 rate_limit_delay 则更可靠。
+                last_exc = exc
+                wait_secs = self.config.rate_limit_delay
+                logger.warning(
+                    "ActionSelector LLM 调用失败（第 %d/%d 次尝试）: %s%s",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    f"，即将等待 {wait_secs}s 后重试" if will_retry else "，已达重试上限",
+                )
+                if will_retry:
+                    await asyncio.sleep(wait_secs)
+                continue
             except anthropic.APIError as exc:
                 last_exc = exc
                 logger.warning(

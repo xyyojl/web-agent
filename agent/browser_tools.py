@@ -25,6 +25,28 @@ from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL
 from agent.tracer import TraceLogger
 from agent.types import ObserveResult, ToolResult
 
+# 独立抓取页面上所有 <a> 标签的 text + href，供 browser_extract 使用。
+_EXTRACT_LINKS_JS = """
+() => {
+    const isVisible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden"
+        );
+    };
+    return Array.from(document.querySelectorAll("a"))
+        .filter(isVisible)
+        .map((el) => ({
+            text: (el.innerText || "").trim(),
+            href: el.getAttribute("href"),
+        }));
+}
+"""
+
 # 加载项目根目录下的 .env 文件（若存在），使 ANTHROPIC_API_KEY 等变量
 # 能在未手动 export 的情况下被 os.environ.get() 读取到。
 load_dotenv()
@@ -123,7 +145,9 @@ async def _try_click_role(page, text: str, timeout: int) -> str:
     errors: list[Exception] = []
     for role in ("button", "link"):
         try:
-            await page.get_by_role(role, name=text).click(timeout=timeout)
+            # exact=True 按 role + 精确 name 命中唯一元素，避免子串匹配
+            # 触发 Playwright strict mode violation（多个候选时报错）。
+            await page.get_by_role(role, name=text, exact=True).click(timeout=timeout)
             return role
         except PlaywrightError as exc:
             errors.append(exc)
@@ -147,11 +171,20 @@ async def browser_click(
     url_before = page.url
 
     attempts: list[tuple[str, Callable[[], Awaitable[str | None]]]] = []
+    # 这里在 selector 形如 "text=xxx" 且 text 字段为空时，拆出 xxx 灌进
+    # text/role 降级链，让三级真正跑全；role 那级按 role+name 精准命中唯一按钮。
+    fallback_text: str | None = None
+    if selector and "=" in selector:
+        prefix, _, raw_value = selector.partition("=")
+        if prefix.strip() == "text" and raw_value.strip():
+            fallback_text = raw_value.strip()
+    effective_text = text or fallback_text
+
     if selector:
         selector_value: str = selector
         attempts.append(("css", lambda: _try_click_css(page, selector_value, timeout)))
-    if text:
-        text_value: str = text
+    if effective_text:
+        text_value: str = effective_text
         attempts.append(("text", lambda: _try_click_text(page, text_value, timeout)))
         attempts.append(("role", lambda: _try_click_role(page, text_value, timeout)))
 
@@ -193,6 +226,36 @@ async def browser_click(
     )
 
 
+async def browser_select(page, selector: str, value: str) -> ToolResult:
+    """在 <select> 元素中选中指定 value/label 对应的选项。
+
+    新增：此前的动作集合（click/type/scroll/extract/screenshot/done）里
+    没有专门针对下拉框的操作——click 一个 <select> 元素在 headless
+    Chromium 下不会像原生浏览器那样弹出可交互的选项列表，语义上就无法
+    "选中某个 option"，无论 selector 换成什么、重试多少次都不可能成功。
+
+    select_option 会依次尝试按 value / label / index 匹配，这里直接把
+    ActionSelector 传来的显示文本（如"English"）交给 Playwright 处理，
+    覆盖 value 属性与可见文本不一致的情况（如 value="en", label="English"）。
+    """
+    try:
+        await page.locator(selector).select_option(label=value)
+    except PlaywrightError:
+        # label 匹配失败时，退化尝试直接按 value 属性匹配
+        # （例如 LLM 传来的就是底层 value 而非显示文本）
+        try:
+            await page.locator(selector).select_option(value=value)
+        except Exception as exc:
+            return ToolResult(
+                success=False,
+                page_changed=False,
+                output=None,
+                error_msg=f"下拉框选择失败: {exc}",
+            )
+
+    return ToolResult(success=True, page_changed=False, output=value, error_msg=None)
+
+
 async def browser_type(page, selector: str, text: str) -> ToolResult:
     """向指定 selector 填入文本；命中敏感字段直接抛出 SafetyError（不吞掉）。"""
     _check_sensitive(selector)  # 命中则在此处直接抛出，穿透工具边界
@@ -222,7 +285,7 @@ def _get_client() -> anthropic.AsyncAnthropic:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise LLMError("未配置 ANTHROPIC_API_KEY，无法调用 LLM 抽取", stage="request")
-        _client = anthropic.AsyncAnthropic(api_key=api_key)
+        _client = anthropic.AsyncAnthropic()
     assert _client is not None  # 帮助静态类型检查器收窄为非 Optional
     return _client
 
@@ -268,27 +331,53 @@ async def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None
     raise LLMError(f"LLM 请求失败: {last_exc}", stage="request", retry_count=config.llm_retry)
 
 
+async def _format_links_info(page) -> str:
+    """抓取页面上所有可见 <a> 标签的 text/href，渲染成供 Extractor 阅读的文本块。
+
+    抓取失败（页面异常/超时）时静默降级返回空字符串，不影响抽取主流程——
+    没有链接列表时 Extractor 退回到"看不到就填 null"的原有行为，
+    比让整个 extract 工具失败更稳妥。
+    """
+    try:
+        raw_links: list[dict] = await page.evaluate(_EXTRACT_LINKS_JS)
+    except PlaywrightError:
+        return ""
+
+    if not raw_links:
+        return ""
+
+    lines = ["页面链接列表（text 与 href 均为真实属性，抽取链接相关字段时必须从此处原样取值，不得编造）："]
+    for item in raw_links:
+        text = (item.get("text") or "").strip() or "(无文本)"
+        href = item.get("href")
+        lines.append(f'  - text="{text}" href={href!r}')
+    return "\n".join(lines)
+
+
 async def browser_extract(
     page,
     instruction: str,
     observer: BrowserStateObserver,
     config: AgentConfig,
+    obs: ObserveResult | None = None,
 ) -> ToolResult:
     """依据 instruction 从当前页面文本中抽取结构化 JSON（保留来源 URL）。"""
-    try:
-        obs = await observer.observe(page)
-    except Exception as exc:
-        return ToolResult(
-            success=False,
-            page_changed=False,
-            output=None,
-            error_msg=f"观察页面失败，无法抽取: {exc}",
-        )
+    if obs is None:
+        try:
+            obs = await observer.observe(page)
+        except Exception as exc:
+            return ToolResult(
+                success=False,
+                page_changed=False,
+                output=None,
+                error_msg=f"观察页面失败，无法抽取: {exc}",
+            )
 
     prompt = EXTRACTOR_USER_TMPL.format(
         instruction=instruction,
         title=obs["title"],
         visible_text_summary=obs["visible_text_summary"],
+        links_info=await _format_links_info(page),
     )
 
     try:

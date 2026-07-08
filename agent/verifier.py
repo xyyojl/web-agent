@@ -6,9 +6,11 @@
 verify() 本身不会抛出未捕获异常。
 """
 
+import asyncio
 import json
 import logging
 import os
+import re
 
 import anthropic
 from anthropic.types import Message, MessageParam, TextBlock
@@ -21,12 +23,44 @@ logger = logging.getLogger(__name__)
 
 _VALID_VERIFY_MODES = ("exact", "contains", "json_schema", "llm_judge")
 
+# 兜底修复：Judge 输出严格按 {"success": bool, "reason": str, "confidence": float}
+# 三个固定字段、固定顺序（JUDGE_SYSTEM 里约定的格式），即使 reason 字符串内部
+# 出现了未转义的双引号（模型习惯性地用英文双引号引用具体词语，例如
+# reason 里写 "锁定操作"，把外层字符串提前"戳穿"）导致 json.loads 失败，
+# 也能按这个已知的三段式结构把值抠出来，不依赖 reason 内部本身是合法 JSON字符串这个前提。
+_JUDGE_REPAIR_RE = re.compile(
+    r'"success"\s*:\s*(true|false)\s*,\s*"reason"\s*:\s*"(.*)"\s*,\s*"confidence"\s*:\s*([0-9]*\.?[0-9]+)\s*}',
+    re.DOTALL,
+)
 
-def _stringify(value: str | dict | None) -> str:
-    """把 expected_output / result.output（str | dict | None）统一转成字符串。
 
-    dict 用 json.dumps(sort_keys=True) 序列化，保证同一份数据无论键顺序
-    如何都得到一致的字符串，便于 exact/contains 两种模式做文本级比较。
+def _repair_judge_json(raw_text: str) -> dict[str, object] | None:
+    """从格式受损（内部含未转义引号）的 Judge 输出里尽力抠出三个字段。
+
+    只处理"整体结构没坏、只是 reason 内部有未转义引号"这一种已知的、
+    真实复现过的受损模式；如果连 success/confidence这两个锚点字段都对不上，
+    说明输出损坏得更严重，直接返回 None，交由上层退化为 success=False，不做进一步猜测。
+    """
+    match = _JUDGE_REPAIR_RE.search(raw_text)
+    if not match:
+        return None
+    success_str, reason_raw, confidence_str = match.groups()
+    try:
+        confidence = float(confidence_str)
+    except ValueError:
+        return None
+    return {
+        "success": success_str == "true",
+        "reason": reason_raw,
+        "confidence": confidence,
+    }
+
+
+def _stringify(value: str | dict | list | None) -> str:
+    """把 expected_output / result.output（str | dict | list | None）统一转成字符串。
+
+    dict / list 用 json.dumps(sort_keys=True) 序列化，保证同一份数据无论键顺序
+    或数组元素顺序如何都得到一致的字符串，便于 exact/contains 两种模式做文本级比较。
     """
     if value is None:
         return ""
@@ -112,7 +146,7 @@ class Verifier:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not api_key:
                 raise RuntimeError("未配置 ANTHROPIC_API_KEY，无法调用 LLM Judge")
-            self._client = anthropic.AsyncAnthropic(api_key=api_key)
+            self._client = anthropic.AsyncAnthropic()
         assert self._client is not None  # 帮助静态类型检查器收窄为非 Optional
         return self._client
 
@@ -165,11 +199,11 @@ class Verifier:
     @staticmethod
     def _verify_json_schema(case: EvalCase, result: AgentResult) -> VerifyResult:
         expected = case["expected_output"]
-        if not isinstance(expected, dict):
+        if not isinstance(expected, (dict, list)):
             return VerifyResult(
                 case_id=case["id"],
                 success=False,
-                reason="case.expected_output 不是合法的 schema 模板（应为 dict）",
+                reason="case.expected_output 不是合法的 schema 模板（应为 dict 或 list）",
                 confidence=1.0,
             )
 
@@ -196,6 +230,9 @@ class Verifier:
         """调用 LLM Judge 打分。任何环节失败（调用失败/输出非 JSON/字段
         缺失或类型不对）都统一退化为 VerifyResult(success=False, ...)，
         不抛出异常——这是 llm_judge 模式相对其他三种模式唯一的额外风险点。
+
+        对 429 速率限制错误会等待 config.rate_limit_delay 秒后重试，
+        最多重试 config.llm_retry 次。
         """
         try:
             client = self._get_client()
@@ -209,19 +246,48 @@ class Verifier:
         )
 
         messages: list[MessageParam] = [MessageParam(role="user", content=prompt)]
+        max_attempts = max(1, self.config.llm_retry)
+        last_api_exc: anthropic.APIError | None = None
 
-        try:
-            message: Message = await client.messages.create(
-                model=self.config.model,
-                max_tokens=512,
-                timeout=self.config.llm_timeout,
-                system=JUDGE_SYSTEM,
-                messages=messages,
-            )
-        except anthropic.APIError as exc:
-            logger.warning("LLM Judge 调用失败: %s", exc)
+        for attempt in range(max_attempts):
+            will_retry = attempt + 1 < max_attempts
+            try:
+                message: Message = await client.messages.create(
+                    model=self.config.model,
+                    # 512 tokens 在实测中不够用。
+                    # 调大到 1024 留出安全余量，仍远小于会显著增加延迟/成本的量级。
+                    max_tokens=1024,
+                    timeout=self.config.llm_timeout,
+                    system=JUDGE_SYSTEM,
+                    messages=messages,
+                )
+            except anthropic.RateLimitError as exc:
+                last_api_exc = exc
+                wait_secs = self.config.rate_limit_delay
+                logger.warning(
+                    "LLM Judge 调用失败（第 %d/%d 次尝试）: %s%s",
+                    attempt + 1, max_attempts, exc,
+                    f"，即将等待 {wait_secs}s 后重试" if will_retry else "，已达重试上限",
+                )
+                if will_retry:
+                    await asyncio.sleep(wait_secs)
+                continue
+            except anthropic.APIError as exc:
+                last_api_exc = exc
+                logger.warning("LLM Judge 调用失败（第 %d/%d 次尝试）: %s%s",
+                               attempt + 1, max_attempts, exc,
+                               "，即将重试" if will_retry else "，已达重试上限")
+                if will_retry:
+                    await asyncio.sleep(2 ** attempt)
+                continue
+            break  # 调用成功，跳出重试循环
+        else:
+            # 全部重试耗尽
             return VerifyResult(
-                case_id=case["id"], success=False, reason=f"LLM Judge 调用失败: {exc}", confidence=0.0
+                case_id=case["id"],
+                success=False,
+                reason=f"LLM Judge 调用失败: {last_api_exc}",
+                confidence=0.0,
             )
 
         raw_text = "".join(
@@ -236,13 +302,27 @@ class Verifier:
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            logger.warning("LLM Judge 输出无法解析为 JSON: %s；原始输出: %r", exc, raw_text)
-            return VerifyResult(
-                case_id=case["id"],
-                success=False,
-                reason=f"LLM Judge 输出不是合法 JSON: {raw_text[:200]!r}",
-                confidence=0.0,
-            )
+            repaired = _repair_judge_json(raw_text)
+            if repaired is not None:
+                logger.warning(
+                    "LLM Judge 输出不是合法 JSON（%s），已通过兜底修复正则恢复三个字段，"
+                    "原始输出: %r",
+                    exc,
+                    raw_text,
+                )
+                parsed = repaired
+            else:
+                logger.warning(
+                    "LLM Judge 输出无法解析为 JSON 且兜底修复也未命中: %s；原始输出: %r",
+                    exc,
+                    raw_text,
+                )
+                return VerifyResult(
+                    case_id=case["id"],
+                    success=False,
+                    reason=f"LLM Judge 输出不是合法 JSON: {raw_text[:200]!r}",
+                    confidence=0.0,
+                )
 
         if not isinstance(parsed, dict):
             return VerifyResult(

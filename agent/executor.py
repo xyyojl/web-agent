@@ -14,17 +14,18 @@ from agent.browser_tools import (
     browser_open,
     browser_screenshot,
     browser_scroll,
+    browser_select,
     browser_type,
 )
 from agent.config import AgentConfig
 from agent.exceptions import SafetyError
 from agent.observer import BrowserStateObserver
 from agent.tracer import TraceLogger
-from agent.types import LLMAction, ToolResult
+from agent.types import LLMAction, ObserveResult, ToolResult
 
 logger = logging.getLogger(__name__)
 
-_KNOWN_ACTIONS = ("click", "type", "scroll", "extract", "screenshot", "done")
+_KNOWN_ACTIONS = ("click", "type", "scroll", "extract", "screenshot", "select", "done")
 
 
 class PlaywrightExecutor:
@@ -90,11 +91,16 @@ class PlaywrightExecutor:
                 success=False, page_changed=False, output=None, error_msg=str(exc)
             )
 
-    async def execute(self, action: LLMAction) -> ToolResult:
+    async def execute(self, action: LLMAction, obs: ObserveResult | None = None) -> ToolResult:
         """按 action['action'] 分发到对应的 browser_tools 函数。
 
         page 尚未初始化（未调用 open() 或已 close()）、action 类型未知、
         必填字段缺失，均返回 ToolResult(success=False)，不抛异常。
+
+        obs：主循环这一步已经 observe() 过的结果，目前只有 extract 会用到
+        ——避免 browser_extract 内部再重新 observe 一次（重复扫描页面 +
+        额外占用一个截图编号，导致 trace.jsonl 里的 screenshot 字段和
+        实际截图文件编号对不上）。其余动作不需要 obs，传 None 即可。
         """
         if self.page is None:
             return ToolResult(
@@ -114,7 +120,7 @@ class PlaywrightExecutor:
             )
 
         try:
-            return await self._dispatch(action_name, action)
+            return await self._dispatch(action_name, action, obs)
         except SafetyError:
             # 同 open()：安全拦截刻意穿透，不在此处转换成 ToolResult。
             raise
@@ -124,7 +130,9 @@ class PlaywrightExecutor:
                 success=False, page_changed=False, output=None, error_msg=str(exc)
             )
 
-    async def _dispatch(self, action_name: str, action: LLMAction) -> ToolResult:
+    async def _dispatch(
+        self, action_name: str, action: LLMAction, obs: ObserveResult | None = None
+    ) -> ToolResult:
         """真正的分发逻辑，拆成独立方法便于 execute() 统一做异常兜底。"""
         assert self.page is not None  # execute() 已确保非空，帮助类型检查器收窄
 
@@ -168,7 +176,31 @@ class PlaywrightExecutor:
                     output=None,
                     error_msg="extract 动作缺少必填的 value（抽取指令）字段",
                 )
-            return await browser_extract(self.page, instruction, self.observer, self.config)
+            if obs is None:
+                # 兜底：理论上主循环每一步都会先 observe 再 execute，
+                # obs 不应为 None；如果调用方没传（比如未来新增的调用
+                # 路径漏传），退化成原来的行为——由 browser_extract 自己
+                # 重新 observe 一次，保证功能不中断，只是会重新出现
+                # 多占一个截图编号的现象。
+                logger.warning("execute(extract) 未收到 obs，退化为内部重新 observe")
+                return await browser_extract(
+                    self.page, instruction, self.observer, self.config
+                )
+            return await browser_extract(
+                self.page, instruction, self.observer, self.config, obs=obs
+            )
+
+        if action_name == "select":
+            selector = action.get("selector")
+            value = action.get("value")
+            if not selector or not value:
+                return ToolResult(
+                    success=False,
+                    page_changed=False,
+                    output=None,
+                    error_msg="select 动作缺少必填的 selector 或 value",
+                )
+            return await browser_select(self.page, selector, value)
 
         if action_name == "screenshot":
             return await browser_screenshot(self.page, self.tracer)

@@ -37,10 +37,16 @@ class TraceLogger:
 
     @staticmethod
     def _parse_selector_level(selector: str | None) -> str | None:
-        """从 selector 字符串解析定位策略层级。
+        """从 selector 字符串解析定位策略层级（兜底方案）。
 
         例如 "text=Quickstart" -> "text"；"css=#submit" -> "css"；
         无 "=" 分隔符的原始 selector 归类为 "raw"；selector 为空返回 None。
+
+        注意：这只是按前缀猜的，不代表最终真的是这一级命中的——比如
+        "text=xxx" 本身就是合法的 Playwright locator 语法，可能在
+        browser_click 三级降级的第一级（css/locator）就直接命中了，
+        根本没走到 text 这一级。record() 会优先用 _resolve_selector_level
+        读取 ToolResult.output 里的真实结果，只有拿不到时才退回这个猜测。
         """
         if not selector:
             return None
@@ -48,6 +54,26 @@ class TraceLogger:
             level, _ = selector.split("=", 1)
             return level
         return "raw"
+
+    @classmethod
+    def _resolve_selector_level(cls, action: LLMAction, result: ToolResult) -> str | None:
+        """解析这一步实际生效的 selector_level。
+
+        click 动作的 browser_click() 会把三级降级里真正命中的那一级
+        （"css"/"text"/"role"）写进 ToolResult.output（一段 JSON 字符串），
+        这是唯一可信的来源；只有 output 缺失/非 click 动作/解析失败时，
+        才退回 _parse_selector_level 按 selector 字符串前缀做的猜测。
+        """
+        if action.get("action") == "click":
+            output = result.get("output")
+            if isinstance(output, str):
+                try:
+                    parsed = json.loads(output)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict) and isinstance(parsed.get("selector_level"), str):
+                    return parsed["selector_level"]
+        return cls._parse_selector_level(action.get("selector"))
 
     def record(
         self,
@@ -70,7 +96,7 @@ class TraceLogger:
             "plan": plan,
             "action": action.get("action"),
             "selector": action.get("selector"),
-            "selector_level": self._parse_selector_level(action.get("selector")),
+            "selector_level": self._resolve_selector_level(action, result),
             "success": result.get("success"),
             "page_changed": result.get("page_changed"),
             "reason": action.get("reason"),

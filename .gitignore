@@ -43,3 +43,7 @@ test-results/
 
 # Logs
 *.log
+
+# Eval
+traces/
+eval_summary.md

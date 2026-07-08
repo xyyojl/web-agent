@@ -2,15 +2,13 @@
   "id": "L07",
   "type": "local",
   "task_type": "抽取表格前3行JSON",
-  "task": "抽取排行榜表格中的前 3 行数据（每行含 name 和 score 字段），以 JSON 数组格式返回",
+  "task": "抽取排行榜表格中的前 3 行数据（每行含 name 和 score 字段），以 JSON 数组格式返回，score 字段必须是 number 类型",
   "url": "http://localhost:8080/table_extract.html",
-  "expected_output": {
-    "rows": [
-      {"name": "Alice", "score": 98},
-      {"name": "Bob", "score": 91},
-      {"name": "Charlie", "score": 87}
-    ]
-  },
+  "expected_output": [
+    {"name": "Alice", "score": 98},
+    {"name": "Bob", "score": 91},
+    {"name": "Charlie", "score": 87}
+  ],
   "verify_mode": "json_schema",
   "difficulty": "high"
 }

@@ -2,7 +2,7 @@
   "id": "L01",
   "type": "local",
   "task_type": "找版本号",
-  "task": "找到页面上的版本号，返回完整版本字符串",
+  "task": "找到页面上的版本号，返回完整版本字符串。最终答案必须严格满足任务要求，禁止添加任何解释文字",
   "url": "http://localhost:8080/text_find.html",
   "expected_output": "v2.3.1",
   "verify_mode": "exact",

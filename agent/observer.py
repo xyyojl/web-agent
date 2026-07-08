@@ -5,6 +5,7 @@
 """
 
 import logging
+import re
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # 提取可见文本：过滤 script/style/noscript 等不可见节点，
 # 按文档流顺序拼接可见文本节点，交给 Python 侧再做长度截断。
-_EXTRACT_TEXT_JS = """
+_EXTRACT_TEXT_JS = r"""
 () => {
     const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
     const isVisible = (el) => {
@@ -34,6 +35,22 @@ _EXTRACT_TEXT_JS = """
         const style = window.getComputedStyle(el);
         return style && style.display !== "none" && style.visibility !== "hidden";
     };
+    // 这里把 <table> 单独摘出来，按行序列化成 Markdown 风格的
+    // "| cell1 | cell2 |"，每一行的列边界都显式标出，不再需要模型自己
+    // 去猜"这个数字属于哪一行哪一列"。
+    const isTableDescendant = (el) => !!el.closest("table");
+    const serializeTable = (table) => {
+        const rows = Array.from(table.querySelectorAll("tr")).filter(isVisible);
+        const lines = rows.map((tr) => {
+            const cells = Array.from(tr.querySelectorAll("th, td")).filter(isVisible);
+            const cellTexts = cells.map((c) =>
+                (c.innerText || "").trim().replace(/\s+/g, " ")
+            );
+            return "| " + cellTexts.join(" | ") + " |";
+        });
+        return lines.join("\n");
+    };
+    const tables = Array.from(document.querySelectorAll("table")).filter(isVisible);
     const walker = document.createTreeWalker(
         document.body,
         NodeFilter.SHOW_TEXT,
@@ -43,6 +60,7 @@ _EXTRACT_TEXT_JS = """
                 if (!parent) return NodeFilter.FILTER_REJECT;
                 if (skipTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
                 if (!isVisible(parent)) return NodeFilter.FILTER_REJECT;
+                if (isTableDescendant(parent)) return NodeFilter.FILTER_REJECT;
                 if (!node.textContent || !node.textContent.trim()) {
                     return NodeFilter.FILTER_SKIP;
                 }
@@ -50,12 +68,32 @@ _EXTRACT_TEXT_JS = """
             },
         }
     );
+    // 给关键标签加最基础的结构前缀——标题用
+    // "# "，按钮/tab 用 "[按钮] "，列表项用 "- "——不引入完整 DOM 树，
+    // 只是让 LLM 不必再靠猜测区分"这是标题" vs "这是列表内容"。
+    const prefixFor = (tag) => {
+        if (/^H[1-6]$/.test(tag)) return "# ";
+        if (tag === "BUTTON") return "[按钮] ";
+        if (tag === "LI") return "- ";
+        return "";
+    };
     const parts = [];
     let node;
     while ((node = walker.nextNode())) {
-        parts.push(node.textContent.trim());
+        const tag = node.parentElement.tagName;
+        parts.push(prefixFor(tag) + node.textContent.trim());
     }
-    return parts.join(" ");
+    // 表格统一追加在最后，用 [表格] 标注开头，避免和上面的普通文本
+    // 混在一起分不清；这里没有按表格在文档中的原始位置做精确插入
+    // （对绝大多数任务场景足够，若页面有多段正文夹杂多个表格、且顺序
+    // 很关键，需要进一步改成按 DOM 顺序插入）。
+    tables.forEach((table) => {
+        const serialized = serializeTable(table);
+        if (serialized.trim()) {
+            parts.push("[表格]\n" + serialized);
+        }
+    });
+    return parts.join("\n");
 }
 """
 
@@ -75,14 +113,22 @@ _EXTRACT_ELEMENTS_JS = """
     };
 
     const buildSelector = (el) => {
-        const text = (el.innerText || el.value || "").trim();
-        if (text && text.length <= 60) {
-            return `text=${text}`;
+        const tag = el.tagName.toLowerCase();
+        // text= 定位只应保留给 button/a 这类靠可见文字辨识的元素；
+        // 表单控件一律优先用 css=#id，其次退化到 nth-of-type。
+        const isFormControl = tag === "input" || tag === "select" || tag === "textarea";
+        if (!isFormControl) {
+            const text = (el.innerText || "").trim();
+            if (text && text.length <= 60) {
+                return `text=${text}`;
+            }
         }
         if (el.id) {
             return `css=#${el.id}`;
         }
-        const tag = el.tagName.toLowerCase();
+        if (el.name) {
+            return `css=${tag}[name='${el.name}']`;
+        }
         const siblings = Array.from(el.parentElement ? el.parentElement.children : []).filter(
             (n) => n.tagName === el.tagName
         );
@@ -102,6 +148,23 @@ _EXTRACT_ELEMENTS_JS = """
     };
 
     const nameFor = (el) => {
+        // 对表单控件，必须优先看"当前实际值"，value 为空时才退化到
+        // placeholder / aria-label 作为提示信息展示。
+        const tag = el.tagName.toLowerCase();
+        if (tag === "input" || tag === "textarea") {
+            const value = el.value;
+            if (value) return String(value);
+            const placeholder = el.getAttribute("placeholder");
+            if (placeholder) return placeholder;
+            const aria = el.getAttribute("aria-label");
+            if (aria) return aria;
+            return "";
+        }
+        if (tag === "select") {
+            const selected = el.selectedOptions && el.selectedOptions[0];
+            if (selected) return selected.text.trim();
+            return "";
+        }
         const text = (el.innerText || "").trim();
         if (text) return text;
         const aria = el.getAttribute("aria-label");
@@ -111,6 +174,14 @@ _EXTRACT_ELEMENTS_JS = """
         const value = el.value;
         if (value) return String(value);
         return "";
+    };
+
+    // 新增：<a> 标签的 href 属性。textContent/innerText 采集不到这个
+    // 不可见属性，此前 Planner/Extractor 都看不到链接指向哪里，只能靠 LLM 幻觉编造。
+    const hrefFor = (el) => {
+        if (el.tagName.toLowerCase() !== "a") return null;
+        const href = el.getAttribute("href");
+        return href === null ? null : href;
     };
 
     // button > a > input > select 优先级
@@ -128,12 +199,16 @@ _EXTRACT_ELEMENTS_JS = """
             if (results.length >= maxElements) break;
             if (!isVisible(el)) continue;
             const selector = buildSelector(el);
-            if (seen.has(selector)) continue;
-            seen.add(selector);
+            const href = hrefFor(el);
+            // 对 <a> 元素额外把 href 并入去重 key，文字相同但目标不同的链接不再被误判为重复。
+            const dedupeKey = href !== null ? `${selector}::${href}` : selector;
+            if (seen.has(dedupeKey)) continue;
+            seen.add(dedupeKey);
             results.push({
                 role: roleFor(el),
                 name: nameFor(el),
                 selector: selector,
+                href: href,
             });
         }
         if (results.length >= maxElements) break;
@@ -192,6 +267,7 @@ class BrowserStateObserver:
                 role=item.get("role", ""),
                 name=item.get("name", ""),
                 selector=item.get("selector", ""),
+                href=item.get("href"),
             )
             for item in raw_elements[: self.config.obs_max_elements]
         ]
@@ -216,6 +292,8 @@ class BrowserStateObserver:
 
     @staticmethod
     def _truncate_text(text: str, limit: int) -> str:
-        """将连续空白折叠为单个空格后按字符数截断到 limit。"""
-        collapsed = " ".join(text.split())
-        return collapsed[:limit]
+        """折叠行内多余空白，保留换行分隔符，再按字符数截断到 limit。"""
+        # 只折叠横向空白（空格/Tab），保留换行，让 LLM 能感知列表项边界
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n", "\n", text)  # 合并连续空行为单个换行
+        return text.strip()[:limit]

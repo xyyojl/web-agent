@@ -5,6 +5,7 @@ class Element(TypedDict):
     role:     str
     name:     str
     selector: str
+    href:     str | None
 
 
 class ObserveResult(TypedDict):
@@ -16,7 +17,7 @@ class ObserveResult(TypedDict):
 
 
 class LLMAction(TypedDict):
-    action:   Literal["click", "type", "scroll", "extract", "screenshot", "done"]
+    action:   Literal["click", "type", "scroll", "extract", "screenshot", "select", "done"]
     selector: str | None
     text:     str | None
     value:    str | None
@@ -45,7 +46,7 @@ class EvalCase(TypedDict):
     task_type:       str
     task:            str
     url:             str
-    expected_output: str | dict
+    expected_output: str | dict | list
     verify_mode:     Literal["exact", "contains", "json_schema", "llm_judge"]
     difficulty:      str
 

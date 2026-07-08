@@ -43,7 +43,10 @@ def _format_observation(obs: ObserveResult) -> str:
     else:
         for idx, el in enumerate(elements, start=1):
             name = el["name"] or "(无文本)"
-            lines.append(f"  {idx}. [{el['role']}] {name}")
+            # Planner 判断"任务已完成/可直接给出答案"时能看到真实目标，
+            # 而不是像此前那样看不到 href 只能靠 LLM 常识编造。
+            href_info = f" href={el['href']}" if el.get("href") else ""
+            lines.append(f"  {idx}. [{el['role']}] {name}{href_info}")
     return "\n".join(lines)
 
 
@@ -63,7 +66,7 @@ class WebPlanner:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not api_key:
                 raise LLMError("未配置 ANTHROPIC_API_KEY，无法调用 Planner", stage="request")
-            self._client = anthropic.AsyncAnthropic(api_key=api_key)
+            self._client = anthropic.AsyncAnthropic()
         assert self._client is not None  # 帮助静态类型检查器收窄为非 Optional
         return self._client
 
@@ -104,6 +107,22 @@ class WebPlanner:
                     system=PLANNER_SYSTEM,
                     messages=messages,
                 )
+            except anthropic.RateLimitError as exc:
+                # 429 速率限制：免费模型速率窗口通常为 1 分钟，
+                # 短时间指数退避反而加剧频率压力，改用固定的 rate_limit_delay 则更可靠。
+                last_exc = exc
+                will_retry = attempt + 1 < max_attempts
+                wait_secs = self.config.rate_limit_delay
+                logger.warning(
+                    "WebPlanner LLM 调用失败（第 %d/%d 次尝试）: %s%s",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                    f"，即将等待 {wait_secs}s 后重试" if will_retry else "，已达重试上限",
+                )
+                if will_retry:
+                    await asyncio.sleep(wait_secs)
+                continue
             except anthropic.APIError as exc:
                 last_exc = exc
                 will_retry = attempt + 1 < max_attempts
