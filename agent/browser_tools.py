@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 from typing import Awaitable, Callable, Literal
@@ -17,6 +18,7 @@ import anthropic
 from anthropic.types import Message, MessageParam, TextBlock
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError, LLMError, SafetyError
@@ -24,6 +26,8 @@ from agent.observer import BrowserStateObserver
 from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL
 from agent.tracer import TraceLogger
 from agent.types import ObserveResult, ToolResult
+
+logger = logging.getLogger(__name__)
 
 # 独立抓取页面上所有 <a> 标签的 text + href，供 browser_extract 使用。
 _EXTRACT_LINKS_JS = """
@@ -94,9 +98,34 @@ async def _detect_login_page(page) -> str | None:
 
 
 async def browser_open(page, url: str, config: AgentConfig) -> ToolResult:
-    """打开 URL；若命中登录页信号，暂停请求人工确认是否继续。"""
+    """打开 URL；若命中登录页信号，暂停请求人工确认是否继续。
+
+    页面加载/网络超时统一识别为 PlaywrightTimeoutError，包装为 BrowserError
+    并记录 warning 后转换为 ToolResult(success=False, error_msg="timeout")，
+    与其他打开失败（DNS 解析失败、证书错误等）区分开，便于上层按超时单独重试/降级。
+    """
     try:
         await page.goto(url, timeout=config.browser_timeout)
+    except PlaywrightTimeoutError as exc:
+        browser_err = BrowserError(
+            "打开页面超时",
+            action="goto",
+            selector=None,
+            timeout_ms=config.browser_timeout,
+        )
+        logger.warning(
+            "browser_open 超时: url=%s, timeout_ms=%d, detail=%s",
+            url,
+            config.browser_timeout,
+            browser_err,
+            exc_info=exc,
+        )
+        return ToolResult(
+            success=False,
+            page_changed=False,
+            output=None,
+            error_msg="timeout",
+        )
     except Exception as exc:
         return ToolResult(
             success=False,
@@ -201,6 +230,18 @@ async def browser_click(
         try:
             resolved_role = await attempt()
             page_changed = page.url != url_before
+            if page_changed:
+                # 点击触发了跳转：等待新页面网络空闲，降低"跳转后元素消失/
+                # 半成品 DOM"导致后续 observe/click 误判的概率。networkidle
+                # 超时不视为点击失败——点击动作本身已经成功，这里只是尽力
+                # 让页面稳定下来，超时就降级放行，记录 warning 供排查。
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except PlaywrightTimeoutError as wait_exc:
+                    logger.warning(
+                        "browser_click 后等待 networkidle 超时（跳转已发生），降级继续: %s",
+                        wait_exc,
+                    )
             output = json.dumps(
                 {
                     "selector_level": level,

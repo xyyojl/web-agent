@@ -253,7 +253,12 @@ class ActionSelector:
 
             try:
                 action = _build_llm_action(tool_use)
-            except ValueError as exc:
+            except (ValueError, TypeError, KeyError) as exc:
+                # ValueError: _get_str_field/字段校验主动抛出的“非法值”。
+                # TypeError/KeyError: tool_use.input 结构本身不符合预期
+                # （例如 SDK 返回的 input 不是预期的 dict 结构、字段缺失导致的
+                # 底层 dict 操作异常）——同样视为一次“LLM 返回非法 action”，
+                # 统一归一为 LLMError 触发 retry，而不是让整条任务链路崩溃。
                 last_exc = LLMError(f"tool_use 解析失败: {exc}", stage="parse")
                 logger.warning(
                     "ActionSelector tool_use 解析失败（第 %d/%d 次尝试）: %s%s",

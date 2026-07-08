@@ -7,7 +7,7 @@
 import logging
 import re
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError
@@ -252,6 +252,16 @@ class BrowserStateObserver:
                 ),
                 exc_info=exc,
             )
+
+        # networkidle 只保证"没有活跃网络请求"，不保证 JS 渲染/动画/懒加载
+        # 已完成写入 DOM（常见于 SPA 首屏渲染后仍有一次 setState 补数据）。
+        # 额外等待固定 500ms 作为廉价的兜底，牺牲少量延迟换取更稳定的采集结果；
+        # 若失败（页面已关闭等）不影响主流程，静默忽略即可。
+        try:
+            await page.wait_for_timeout(500)
+        except PlaywrightError:
+            # 页面已关闭等场景下静默忽略，不影响主流程
+            pass
 
         url = page.url
         title = await page.title()
