@@ -4,7 +4,7 @@ from dataclasses import dataclass, fields
 
 @dataclass
 class AgentConfig:
-    model:              str   = "sensenova-6.7-flash-lite"
+    model:              str   = "claude-sonnet-4-6"
     max_steps:          int   = 15
     max_fail:           int   = 3
     step_delay:         float = 0.5
@@ -12,6 +12,7 @@ class AgentConfig:
     obs_text_limit:     int   = 3000
     llm_timeout:        int   = 30
     browser_timeout:    int   = 15000
+    open_retry:         int   = 2
     llm_retry:          int   = 3
     trace_dir:          str   = "traces"
     rate_limit_delay:   int   = 60

@@ -227,12 +227,14 @@ class Verifier:
         )
 
     async def _verify_llm_judge(self, case: EvalCase, result: AgentResult) -> VerifyResult:
-        """调用 LLM Judge 打分。任何环节失败（调用失败/输出非 JSON/字段
-        缺失或类型不对）都统一退化为 VerifyResult(success=False, ...)，
-        不抛出异常——这是 llm_judge 模式相对其他三种模式唯一的额外风险点。
+        """调用 LLM Judge 打分。调用异常、返回内容为空、JSON 解析失败、
+        字段缺失或类型不对——这四类失败都视为一次"格式抖动"，统一纳入
+        同一套重试逻辑；只有 config.llm_retry 次全部用尽仍未拿到合法结果，
+        才最终退化为 VerifyResult(success=False, ...)。verify() 本身
+        不会因 llm_judge 抛出未捕获异常。
 
-        对 429 速率限制错误会等待 config.rate_limit_delay 秒后重试，
-        最多重试 config.llm_retry 次。
+        对 429 速率限制错误会等待 config.rate_limit_delay 秒后重试；
+        其余情况按指数退避（2 ** attempt 秒）重试。
         """
         try:
             client = self._get_client()
@@ -247,10 +249,11 @@ class Verifier:
 
         messages: list[MessageParam] = [MessageParam(role="user", content=prompt)]
         max_attempts = max(1, self.config.llm_retry)
-        last_api_exc: anthropic.APIError | None = None
+        last_failure_reason = "未知错误"
 
         for attempt in range(max_attempts):
             will_retry = attempt + 1 < max_attempts
+
             try:
                 message: Message = await client.messages.create(
                     model=self.config.model,
@@ -262,7 +265,7 @@ class Verifier:
                     messages=messages,
                 )
             except anthropic.RateLimitError as exc:
-                last_api_exc = exc
+                last_failure_reason = f"LLM Judge 调用失败: {exc}"
                 wait_secs = self.config.rate_limit_delay
                 logger.warning(
                     "LLM Judge 调用失败（第 %d/%d 次尝试）: %s%s",
@@ -273,85 +276,105 @@ class Verifier:
                     await asyncio.sleep(wait_secs)
                 continue
             except anthropic.APIError as exc:
-                last_api_exc = exc
+                last_failure_reason = f"LLM Judge 调用失败: {exc}"
                 logger.warning("LLM Judge 调用失败（第 %d/%d 次尝试）: %s%s",
                                attempt + 1, max_attempts, exc,
                                "，即将重试" if will_retry else "，已达重试上限")
                 if will_retry:
                     await asyncio.sleep(2 ** attempt)
                 continue
-            break  # 调用成功，跳出重试循环
-        else:
-            # 全部重试耗尽
-            return VerifyResult(
-                case_id=case["id"],
-                success=False,
-                reason=f"LLM Judge 调用失败: {last_api_exc}",
-                confidence=0.0,
-            )
 
-        raw_text = "".join(
-            block.text for block in message.content if isinstance(block, TextBlock)
-        ).strip()
+            # 以下都是"API 调用成功，但输出内容有格式问题"的场景：
+            # 空内容 / 非法 JSON（且兜底正则也未命中）/ 字段缺失或类型不对。
+            # 三种情况都视为一次可重试的格式抖动，而不是立即判负。
 
-        cleaned = raw_text
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
+            raw_text = "".join(
+                block.text for block in message.content if isinstance(block, TextBlock)
+            ).strip()
 
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            repaired = _repair_judge_json(raw_text)
-            if repaired is not None:
+            if not raw_text:
+                block_types = [type(block).__name__ for block in message.content]
+                last_failure_reason = "LLM Judge 多次重试后仍返回空内容"
                 logger.warning(
-                    "LLM Judge 输出不是合法 JSON（%s），已通过兜底修复正则恢复三个字段，"
-                    "原始输出: %r",
-                    exc,
-                    raw_text,
+                    "LLM Judge 返回内容为空（第 %d/%d 次尝试），stop_reason=%s，content=%s%s",
+                    attempt + 1, max_attempts, message.stop_reason, block_types,
+                    "，即将重试" if will_retry else "，已达重试上限",
                 )
-                parsed = repaired
-            else:
+                if will_retry:
+                    await asyncio.sleep(2 ** attempt)
+                continue
+
+            cleaned = raw_text
+            if cleaned.startswith("```"):
+                cleaned = cleaned.strip("`")
+                cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
+
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError as exc:
+                repaired = _repair_judge_json(raw_text)
+                if repaired is not None:
+                    logger.warning(
+                        "LLM Judge 输出不是合法 JSON（%s），已通过兜底修复正则恢复三个字段，"
+                        "原始输出: %r",
+                        exc,
+                        raw_text,
+                    )
+                    parsed = repaired
+                else:
+                    last_failure_reason = f"LLM Judge 输出不是合法 JSON: {raw_text[:200]!r}"
+                    logger.warning(
+                        "LLM Judge 输出无法解析为 JSON 且兜底修复也未命中（第 %d/%d 次尝试）: "
+                        "%s；原始输出: %r%s",
+                        attempt + 1, max_attempts, exc, raw_text,
+                        "，即将重试" if will_retry else "，已达重试上限",
+                    )
+                    if will_retry:
+                        await asyncio.sleep(2 ** attempt)
+                    continue
+
+            if not isinstance(parsed, dict):
+                last_failure_reason = f"LLM Judge 输出不是 JSON 对象: {parsed!r}"
                 logger.warning(
-                    "LLM Judge 输出无法解析为 JSON 且兜底修复也未命中: %s；原始输出: %r",
-                    exc,
-                    raw_text,
+                    "LLM Judge 输出不是 JSON 对象（第 %d/%d 次尝试）: %r%s",
+                    attempt + 1, max_attempts, parsed,
+                    "，即将重试" if will_retry else "，已达重试上限",
                 )
-                return VerifyResult(
-                    case_id=case["id"],
-                    success=False,
-                    reason=f"LLM Judge 输出不是合法 JSON: {raw_text[:200]!r}",
-                    confidence=0.0,
-                )
+                if will_retry:
+                    await asyncio.sleep(2 ** attempt)
+                continue
 
-        if not isinstance(parsed, dict):
+            judged_success = parsed.get("success")
+            judged_reason = parsed.get("reason")
+            judged_confidence = parsed.get("confidence")
+
+            if (
+                not isinstance(judged_success, bool)
+                or not isinstance(judged_reason, str)
+                or not isinstance(judged_confidence, (int, float))
+                or isinstance(judged_confidence, bool)
+            ):
+                last_failure_reason = f"LLM Judge 输出字段缺失或类型不对: {parsed!r}"
+                logger.warning(
+                    "LLM Judge 输出字段缺失或类型不对（第 %d/%d 次尝试）: %r%s",
+                    attempt + 1, max_attempts, parsed,
+                    "，即将重试" if will_retry else "，已达重试上限",
+                )
+                if will_retry:
+                    await asyncio.sleep(2 ** attempt)
+                continue
+
             return VerifyResult(
                 case_id=case["id"],
-                success=False,
-                reason=f"LLM Judge 输出不是 JSON 对象: {parsed!r}",
-                confidence=0.0,
+                success=judged_success,
+                reason=judged_reason,
+                confidence=float(judged_confidence),
             )
 
-        judged_success = parsed.get("success")
-        judged_reason = parsed.get("reason")
-        judged_confidence = parsed.get("confidence")
-
-        if (
-            not isinstance(judged_success, bool)
-            or not isinstance(judged_reason, str)
-            or not isinstance(judged_confidence, (int, float))
-            or isinstance(judged_confidence, bool)
-        ):
-            return VerifyResult(
-                case_id=case["id"],
-                success=False,
-                reason=f"LLM Judge 输出字段缺失或类型不对: {parsed!r}",
-                confidence=0.0,
-            )
-
+        # 全部重试耗尽，仍未拿到一次完全合法的 Judge 输出
         return VerifyResult(
             case_id=case["id"],
-            success=judged_success,
-            reason=judged_reason,
-            confidence=float(judged_confidence),
+            success=False,
+            reason=last_failure_reason,
+            confidence=0.0,
         )

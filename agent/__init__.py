@@ -26,6 +26,11 @@ from agent.exceptions import (
     WebAgentError,
 )
 from agent.observer import BrowserStateObserver
+from agent.planner import WebPlanner
+from agent.action_selector import ActionSelector
+from agent.executor import PlaywrightExecutor
+from agent.agent_controller import AgentController
+from agent.verifier import Verifier
 from agent.prompts import (
     EXTRACTOR_SYSTEM,
     EXTRACTOR_USER_TMPL,
@@ -63,9 +68,15 @@ __all__ = [
     "BrowserError",
     "LLMError",
     "EvalError",
-    # 执行层
+    # 执行层（基础设施）
     "TraceLogger",
     "BrowserStateObserver",
+    # 编排层（推理 → 决策 → 执行 → 编排 → 验证）
+    "WebPlanner",
+    "ActionSelector",
+    "PlaywrightExecutor",
+    "AgentController",
+    "Verifier",
     # 浏览器工具
     "browser_open",
     "browser_observe",

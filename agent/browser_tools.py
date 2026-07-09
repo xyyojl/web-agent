@@ -101,38 +101,52 @@ async def browser_open(page, url: str, config: AgentConfig) -> ToolResult:
     """打开 URL；若命中登录页信号，暂停请求人工确认是否继续。
 
     页面加载/网络超时统一识别为 PlaywrightTimeoutError，包装为 BrowserError
-    并记录 warning 后转换为 ToolResult(success=False, error_msg="timeout")，
-    与其他打开失败（DNS 解析失败、证书错误等）区分开，便于上层按超时单独重试/降级。
+    并记录 warning。超时属于典型的瞬时性故障（网络抖动、目标站点响应慢），
+    单次失败不代表页面真的打不开，因此这里按 config.open_retry 做少量重试
+    （固定 2s 间隔，不用指数退避——重试次数少，没必要让等待时间迅速拉长）；
+    重试仍失败才返回 ToolResult(success=False, error_msg="timeout")。
+    其他类型的错误（DNS 解析失败、证书错误等）大概率不是瞬时问题，重试
+    也无济于事，不重试，直接返回失败并记录 error_msg。
     """
-    try:
-        await page.goto(url, timeout=config.browser_timeout)
-    except PlaywrightTimeoutError as exc:
-        browser_err = BrowserError(
-            "打开页面超时",
-            action="goto",
-            selector=None,
-            timeout_ms=config.browser_timeout,
-        )
-        logger.warning(
-            "browser_open 超时: url=%s, timeout_ms=%d, detail=%s",
-            url,
-            config.browser_timeout,
-            browser_err,
-            exc_info=exc,
-        )
-        return ToolResult(
-            success=False,
-            page_changed=False,
-            output=None,
-            error_msg="timeout",
-        )
-    except Exception as exc:
-        return ToolResult(
-            success=False,
-            page_changed=False,
-            output=None,
-            error_msg=f"打开页面失败: {exc}",
-        )
+    max_attempts = max(1, config.open_retry + 1)
+    for attempt in range(max_attempts):
+        will_retry = attempt + 1 < max_attempts
+        try:
+            await page.goto(url, timeout=config.browser_timeout)
+            break
+        except PlaywrightTimeoutError as exc:
+            browser_err = BrowserError(
+                "打开页面超时",
+                action="goto",
+                selector=None,
+                timeout_ms=config.browser_timeout,
+            )
+            logger.warning(
+                "browser_open 超时（第 %d/%d 次尝试）: url=%s, timeout_ms=%d, detail=%s%s",
+                attempt + 1,
+                max_attempts,
+                url,
+                config.browser_timeout,
+                browser_err,
+                "，2s 后重试" if will_retry else "，已达重试上限",
+                exc_info=exc,
+            )
+            if will_retry:
+                await asyncio.sleep(2)
+                continue
+            return ToolResult(
+                success=False,
+                page_changed=False,
+                output=None,
+                error_msg="timeout",
+            )
+        except Exception as exc:
+            return ToolResult(
+                success=False,
+                page_changed=False,
+                output=None,
+                error_msg=f"打开页面失败: {exc}",
+            )
 
     signal = await _detect_login_page(page)
     if signal is not None:

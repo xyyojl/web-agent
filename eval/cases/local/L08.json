@@ -2,7 +2,7 @@
   "id": "L08",
   "type": "local",
   "task_type": "抽取所有链接",
-  "task": "抽取页面上所有链接的文本与 href，以 JSON 数组格式返回，数组长度应为 10",
+  "task": "抽取页面上所有链接的内容与目标地址，以 JSON 数组格式返回，包含 'text' 和 'href' 两个字段，数组长度应为 10",
   "url": "http://localhost:8080/links_page.html",
   "expected_output": [
     {"text": "Quickstart 文档", "href": "text_find.html"},

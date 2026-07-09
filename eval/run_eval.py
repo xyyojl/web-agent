@@ -34,10 +34,14 @@ _PROJECT_ROOT: str = str(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from agent.agent_controller import AgentController
-from agent.config import AgentConfig
-from agent.types import AgentResult, EvalCase, VerifyResult
-from agent.verifier import Verifier
+from agent import (
+    AgentConfig,
+    AgentController,
+    AgentResult,
+    EvalCase,
+    Verifier,
+    VerifyResult,
+)
 
 logger = logging.getLogger(__name__)
 
