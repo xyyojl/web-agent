@@ -25,7 +25,12 @@ logger = logging.getLogger(__name__)
 # 每步往 history 里追加一对 (user, assistant) 消息；只保留最近若干步，
 # 避免任务步数一多，喂给 Planner/Selector 的上下文无限膨胀。
 _MAX_HISTORY_STEPS = 5
-_HISTORY_TEXT_LIMIT = 200  # 单条 history 摘要的字符上限，避免整页文本被塞进去
+_HISTORY_TEXT_LIMIT = 200  # 单条 history 摘要（plan/reason 等自然语言文本）的字符上限
+# extract 动作的 output 是结构化 JSON（title/authors/abstract 等），
+# 复用上面 200 字符的通用上限会把 output 拦腰截断。
+# extract 的成功产出必须给到远大于普通文本摘要的预算，才能让 Planner
+# 在下一步真正看到"任务已经可以 done 了"。
+_EXTRACT_OUTPUT_HISTORY_LIMIT = 3000
 
 # 连续 N 次动作完全相同（action/selector/text/value 四元组一致）时，
 # 在下一次调用前往 history 里注入一条纠偏提示；如果纠偏后仍然连续
@@ -55,7 +60,12 @@ def _summarize_result(action: LLMAction, result: ToolResult) -> str:
     if action["action"] == "extract":
         output = result.get("output")
         if output:
-            return f"执行结果: 成功，extract 已返回数据: {output[:_HISTORY_TEXT_LIMIT]}"
+            # 用 _EXTRACT_OUTPUT_HISTORY_LIMIT（远大于通用 _HISTORY_TEXT_LIMIT）
+            # 截断，确保 title/authors/abstract 这类结构化字段大概率能完整
+            # 保留在 history 里，Planner 才能据此判断任务是否已经可以 done。
+            truncated = output[:_EXTRACT_OUTPUT_HISTORY_LIMIT]
+            suffix = "...(已截断)" if len(output) > _EXTRACT_OUTPUT_HISTORY_LIMIT else ""
+            return f"执行结果: 成功，extract 已返回数据: {truncated}{suffix}"
         return "执行结果: extract 调用成功，但未返回任何数据（output 为空）"
 
     if action["action"] == "screenshot":

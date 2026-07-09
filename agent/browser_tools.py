@@ -355,7 +355,7 @@ async def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None
             # （而不是省略该参数），同样是为了保持这是一次静态可解析的直接调用。
             message: Message = await client.messages.create(
                 model=config.model,
-                max_tokens=1024,
+                max_tokens=2048,
                 timeout=config.llm_timeout,
                 system=system if system else anthropic.NOT_GIVEN,
                 messages=messages,
@@ -402,7 +402,15 @@ async def browser_extract(
     config: AgentConfig,
     obs: ObserveResult | None = None,
 ) -> ToolResult:
-    """依据 instruction 从当前页面文本中抽取结构化 JSON（保留来源 URL）。"""
+    """依据 instruction 从当前页面文本中抽取结构化 JSON（保留来源 URL）。
+
+    _call_llm_extract 内部的 llm_retry 只覆盖 anthropic.APIError 这类网络/
+    限流错误，不覆盖"API 调用成功但返回内容为空/不是合法 JSON"这种情况——
+    这类偶发的模型输出异常（尤其是轻量模型，prompt 较大时更容易出现）此前
+    只解析一次，失败就直接判定整个 extract 失败，容易在短时间内连续命中
+    max_fail 触发 consecutive_fail。这里把"调用 LLM + 解析 JSON"作为一个
+    整体，按 config.llm_retry 次数重试，让内容异常也能像网络异常一样自愈。
+    """
     if obs is None:
         try:
             obs = await observer.observe(page)
@@ -421,37 +429,69 @@ async def browser_extract(
         links_info=await _format_links_info(page),
     )
 
-    try:
-        raw_output = await _call_llm_extract(prompt, config, system=EXTRACTOR_SYSTEM)
-    except LLMError as exc:
-        return ToolResult(success=False, page_changed=False, output=None, error_msg=exc.message)
-    except Exception as exc:
-        return ToolResult(
-            success=False, page_changed=False, output=None, error_msg=f"LLM 调用异常: {exc}"
-        )
+    max_attempts = max(1, config.llm_retry)
+    last_error_msg = "未知错误"
 
-    cleaned = raw_output.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
+    for attempt in range(max_attempts):
+        will_retry = attempt + 1 < max_attempts
 
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
+        try:
+            raw_output = await _call_llm_extract(prompt, config, system=EXTRACTOR_SYSTEM)
+        except LLMError as exc:
+            # _call_llm_extract 内部已经把网络层的重试耗尽了，这里再重试
+            # 意味着重新发起一整轮新的请求（而非在同一轮里继续），仍然有机会
+            # 恢复；耗尽后原样返回失败。
+            last_error_msg = exc.message
+            logger.warning(
+                "browser_extract LLM 调用失败（第 %d/%d 次尝试）: %s%s",
+                attempt + 1, max_attempts, exc.message,
+                "，即将重试" if will_retry else "，已达重试上限",
+            )
+            if will_retry:
+                await asyncio.sleep(2**attempt)
+                continue
+            return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
+        except Exception as exc:
+            last_error_msg = f"LLM 调用异常: {exc}"
+            logger.warning(
+                "browser_extract LLM 调用异常（第 %d/%d 次尝试）: %s%s",
+                attempt + 1, max_attempts, exc,
+                "，即将重试" if will_retry else "，已达重试上限",
+            )
+            if will_retry:
+                await asyncio.sleep(2**attempt)
+                continue
+            return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
+
+        cleaned = raw_output.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
+
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            last_error_msg = f"LLM 输出无法解析为 JSON: {exc}"
+            logger.warning(
+                "browser_extract JSON 解析失败（第 %d/%d 次尝试，输出长度=%d）: %s%s",
+                attempt + 1, max_attempts, len(raw_output), exc,
+                "，即将重试" if will_retry else "，已达重试上限",
+            )
+            if will_retry:
+                await asyncio.sleep(2**attempt)
+                continue
+            return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
+
+        result_payload = {"url": obs["url"], "data": parsed}
         return ToolResult(
-            success=False,
+            success=True,
             page_changed=False,
-            output=None,
-            error_msg=f"LLM 输出无法解析为 JSON: {exc}",
+            output=json.dumps(result_payload, ensure_ascii=False),
+            error_msg=None,
         )
 
-    result_payload = {"url": obs["url"], "data": parsed}
-    return ToolResult(
-        success=True,
-        page_changed=False,
-        output=json.dumps(result_payload, ensure_ascii=False),
-        error_msg=None,
-    )
+    # 理论上不会走到这里（循环内每条路径都已 return），仅作类型层面的兜底。
+    return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
 
 
 async def browser_scroll(page, direction: Literal["up", "down"]) -> ToolResult:

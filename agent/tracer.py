@@ -99,6 +99,7 @@ class TraceLogger:
             "selector_level": self._resolve_selector_level(action, result),
             "success": result.get("success"),
             "page_changed": result.get("page_changed"),
+            "error_msg": result.get("error_msg"),
             "reason": action.get("reason"),
             "screenshot": obs.get("screenshot_path"),
             "duration_ms": duration_ms,

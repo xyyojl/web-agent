@@ -2,7 +2,7 @@
   "id": "P04",
   "type": "public",
   "task_type": "结构化抽取",
-  "task": "抽取 playwright PyPI 页面的最新版本号和发布日期，以 JSON 对象格式返回（含 version、date 两个字段，version 为版本号字符串形如 '1.2.3'，date 为发布日期字符串形如 'YYYY-MM-DD' 或月份缩写+日+年）",
+  "task": "抽取 playwright PyPI 页面的最新版本号和发布日期，以 JSON 对象格式返回（含 version、date 两个字段）",
   "url": "https://pypi.org/project/playwright/",
   "expected_output": {
     "version": "1.61.0",
