@@ -15,6 +15,7 @@ from agent.config import AgentConfig
 from agent.exceptions import LLMError
 from agent.prompts import PLANNER_SYSTEM, PLANNER_USER_TMPL
 from agent.types import ObserveResult
+from agent.vision import build_vision_user_content
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +86,8 @@ class WebPlanner:
         """
         client = self._get_client()
 
-        user_content = PLANNER_USER_TMPL.format(
-            task=task, observation=_format_observation(obs)
+        user_content = build_vision_user_content(
+            obs, PLANNER_USER_TMPL.format(task=task, observation=_format_observation(obs))
         )
         # history 的公开签名是 list[dict]（调用方传入普通字典即可，不强制依赖
         # anthropic SDK 的类型），这里用 cast 显式告知类型检查器：

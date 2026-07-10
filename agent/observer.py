@@ -4,6 +4,7 @@
 避免整页 DOM/HTML 撑爆 prompt，同时保留截图供人工排查。
 """
 
+import base64
 import logging
 import re
 
@@ -221,9 +222,14 @@ _EXTRACT_ELEMENTS_JS = """
 class BrowserStateObserver:
     """从 Playwright Page 提取结构化观察结果（不含完整 HTML）。"""
 
-    def __init__(self, config: AgentConfig, tracer: TraceLogger) -> None:
+    def __init__(
+        self, config: AgentConfig, tracer: TraceLogger, vision: bool = False
+    ) -> None:
         self.config = config
         self.tracer = tracer
+        # VISION-001：vision=True 时 observe() 额外采集一张 JPEG 截图并
+        # base64 编码进 ObserveResult。默认 False，不改变现有纯文本观察行为
+        self.vision = vision
 
     async def observe(self, page) -> ObserveResult:
         """采集当前页面状态，返回 ObserveResult。
@@ -292,13 +298,29 @@ class BrowserStateObserver:
                 selector=None,
             ) from exc
 
-        return ObserveResult(
+        result = ObserveResult(
             url=url,
             title=title,
             visible_text_summary=visible_text_summary,
             interactive_elements=interactive_elements,
             screenshot_path=screenshot_path,
         )
+
+        if self.vision:
+            # 单独用 JPEG（quality=80）而非落盘的 PNG trace 截图：JPEG 体积
+            # 明显更小，risk 备注里 +500~2000 token 的估算就是按 JPEG 口径算的，
+            # 复用 PNG trace 截图会让费用进一步上涨。
+            # 这次采集失败不应该拖垮整步观察——文本侧数据已经拿到了，
+            # 这里只记录 warning，把 screenshot_b64 显式置 None，交给
+            # 下游 Planner/ActionSelector 按“没有图像”退化为纯文本请求。
+            try:
+                screenshot_bytes = await page.screenshot(type="jpeg", quality=80)
+                result["screenshot_b64"] = base64.b64encode(screenshot_bytes).decode()
+            except Exception as exc:
+                logger.warning("vision 截图采集失败，本步退化为纯文本观察: %s", exc)
+                result["screenshot_b64"] = None
+
+        return result
 
     @staticmethod
     def _truncate_text(text: str, limit: int) -> str:

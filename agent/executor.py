@@ -45,7 +45,9 @@ class PlaywrightExecutor:
         self.page: Page | None = None
 
         self.tracer = tracer if tracer is not None else TraceLogger(base_dir=config.trace_dir)
-        self.observer = BrowserStateObserver(config, self.tracer)
+        # 与 AgentController 同模式透传 vision：extract 降级路径（未收到外部 obs 时
+        # 内部重新 observe）也要保持 vision 模式一致，避免该路径静默退化为纯 DOM。
+        self.observer = BrowserStateObserver(config, self.tracer, vision=config.vision)
 
     async def open(self, url: str) -> ToolResult:
         """启动 headless Chromium 并打开 url。

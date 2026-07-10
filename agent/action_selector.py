@@ -25,6 +25,7 @@ from agent.config import AgentConfig
 from agent.exceptions import LLMError
 from agent.prompts import SELECTOR_SYSTEM, SELECTOR_TOOLS
 from agent.types import LLMAction, ObserveResult
+from agent.vision import build_vision_user_content
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,7 @@ class ActionSelector:
         """
         client = self._get_client()
 
-        user_content = f"行动计划：{plan}\n\n{_format_observation(obs)}"
+        user_content = build_vision_user_content(obs, f"行动计划：{plan}\n\n{_format_observation(obs)}")
         messages: list[MessageParam] = cast(
             "list[MessageParam]", [*history, {"role": "user", "content": user_content}]
         )

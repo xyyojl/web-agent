@@ -110,7 +110,8 @@ class AgentController:
         self.config = config
         # 初始化顺序不能打乱：TRACE -> OBS -> PLAN -> SEL -> EXEC
         self.tracer = TraceLogger(base_dir=config.trace_dir)
-        self.observer = BrowserStateObserver(config, self.tracer)
+        # vision 开关完全由 AgentConfig 决定（config.vision，默认 False），而不是在这里手写死值
+        self.observer = BrowserStateObserver(config, self.tracer, vision=config.vision)
         self.planner = WebPlanner(config)
         self.selector = ActionSelector(config)
         # 把 controller 自己的 tracer 注入 executor，保证同一次 run 的所有

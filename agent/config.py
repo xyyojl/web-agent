@@ -17,6 +17,7 @@ class AgentConfig:
     trace_dir:          str   = "traces"
     rate_limit_delay:   int   = 60
     case_delay:         float = 0.0
+    vision:             bool  = False
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -26,6 +27,12 @@ class AgentConfig:
         max_steps -> WEBAGENT_MAX_STEPS，与 .env.example 中列出的变量名一一对应。
         `AgentConfig()`（零参构造）的行为不受影响，仍然是纯默认值，
         只有显式调用 from_env() 才会读取环境变量，避免隐式的环境依赖。
+
+        bool 字段必须单独处理：`bool("false")` 在 Python 里是 True
+        （非空字符串一律真值），如果和 int/float 走同一条
+        `field.type(raw_value)` 分支，WEBAGENT_VISION=false 会被错误地
+        解析成 True，环境变量事实上永远关不掉这个开关。这里显式按
+        大小写不敏感的 "1"/"true"/"yes"/"on" 判定真值。
         """
         overrides: dict = {}
         for field in fields(cls):
@@ -33,5 +40,10 @@ class AgentConfig:
             raw_value = os.environ.get(env_name)
             if raw_value is None:
                 continue
-            overrides[field.name] = field.type(raw_value) if field.type in (int, float) else raw_value
+            if field.type is bool:
+                overrides[field.name] = raw_value.strip().lower() in ("1", "true", "yes", "on")
+            elif field.type in (int, float):
+                overrides[field.name] = field.type(raw_value)
+            else:
+                overrides[field.name] = raw_value
         return cls(**overrides)

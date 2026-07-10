@@ -1,4 +1,4 @@
-from typing import TypedDict, Literal
+from typing import NotRequired, TypedDict, Literal
 
 
 class Element(TypedDict):
@@ -14,6 +14,7 @@ class ObserveResult(TypedDict):
     visible_text_summary: str
     interactive_elements: list[Element]
     screenshot_path:      str
+    screenshot_b64:       NotRequired[str | None]
 
 
 class LLMAction(TypedDict):
