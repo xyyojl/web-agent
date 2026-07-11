@@ -40,6 +40,22 @@ _EXTRACT_TEXT_JS = r"""
     // "| cell1 | cell2 |"，每一行的列边界都显式标出，不再需要模型自己
     // 去猜"这个数字属于哪一行哪一列"。
     const isTableDescendant = (el) => !!el.closest("table");
+    // 根据常见的 class/id（如 banner、alert、toast）识别提示区域，
+    // 避免仅依赖模型从页面文本中判断状态信息。
+    // 沿祖先链查找，因为提示文本可能包裹在没有 class 的子元素中。
+    const _HINT_CLASS_RE = /banner|result|alert|toast|notice|message|msg|status|tip|feedback/i;
+    const isHintContainer = (el) => {
+        let node = el;
+        while (node && node !== document.body) {
+            const cls = typeof node.className === "string" ? node.className : "";
+            const id = node.id || "";
+            if (_HINT_CLASS_RE.test(cls) || _HINT_CLASS_RE.test(id)) {
+                return true;
+            }
+            node = node.parentElement;
+        }
+        return false;
+    };
     const serializeTable = (table) => {
         const rows = Array.from(table.querySelectorAll("tr")).filter(isVisible);
         const lines = rows.map((tr) => {
@@ -70,19 +86,21 @@ _EXTRACT_TEXT_JS = r"""
         }
     );
     // 给关键标签加最基础的结构前缀——标题用
-    // "# "，按钮/tab 用 "[按钮] "，列表项用 "- "——不引入完整 DOM 树，
-    // 只是让 LLM 不必再靠猜测区分"这是标题" vs "这是列表内容"。
-    const prefixFor = (tag) => {
+    // "# "，按钮/tab 用 "[按钮] "，列表项用 "- "，命中"提示/结果反馈容器"
+    // 命名模式的用 "[提示] "——不引入完整 DOM 树，只是让 LLM 不必再靠猜测
+    // 区分"这是标题"/"这是提示"还是普通正文。
+    const prefixFor = (tag, el) => {
         if (/^H[1-6]$/.test(tag)) return "# ";
         if (tag === "BUTTON") return "[按钮] ";
         if (tag === "LI") return "- ";
+        if (isHintContainer(el)) return "[提示] ";
         return "";
     };
     const parts = [];
     let node;
     while ((node = walker.nextNode())) {
         const tag = node.parentElement.tagName;
-        parts.push(prefixFor(tag) + node.textContent.trim());
+        parts.push(prefixFor(tag, node.parentElement) + node.textContent.trim());
     }
     // 表格统一追加在最后，用 [表格] 标注开头，避免和上面的普通文本
     // 混在一起分不清；这里没有按表格在文档中的原始位置做精确插入
