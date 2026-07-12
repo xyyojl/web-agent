@@ -14,38 +14,45 @@
                   └────────────┬────────────┘
                                │
                                ▼
+L0 编排层
                   ┌─────────────────────────┐
-   L0 编排层      	│     AgentController     │
+                  │     AgentController     │
                   └────────────┬────────────┘
                                │ (1) 观察
                                ▼
+L1 感知层
                   ┌─────────────────────────┐
-   L1 感知层      	│  BrowserStateObserver   │
+                  │  BrowserStateObserver   │
                   └────────────┬────────────┘
                                │
                                ▼
+L2 推理层
                   ┌─────────────────────────┐
-   L2 推理层      	│       WebPlanner        │
+                  │       WebPlanner        │
                   └────────────┬────────────┘
                                │ (2) 规划
                                ▼
+L3 决策层
                   ┌─────────────────────────┐
-   L3 决策层      	│     ActionSelector      │
+                  │     ActionSelector      │
                   └────────────┬────────────┘
                                │ (3) 动作决策
                                ▼
+L4 执行层
                   ┌─────────────────────────┐
-   L4 执行层      	│   PlaywrightExecutor    │
+                  │   PlaywrightExecutor    │
                   │    + BrowserTools       │
                   └────────────┬────────────┘
-                               │
-                               ▼  (4) 每步记录
+                               │ (4) 每步记录
+                               ▼
+L5 记录层
                   ┌─────────────────────────┐
-   L5 记录层      	│      TraceLogger        │  trace.jsonl + 截图
+                  │      TraceLogger        │  trace.jsonl + 截图
                   └─────────────────────────┘
 
+L6 评测层
                   ┌─────────────────────────┐
-   L6 评测层      	│       Verifier          │  独立于主循环，评测任务结果
+                  │       Verifier          │  独立于主循环，评测任务结果
                   └─────────────────────────┘
 ```
 
@@ -105,10 +112,18 @@ ANTHROPIC_API_KEY=your-anthropic-api-key-here
 ### 3. 运行任务评测
 通过评测套件，您可以一键运行本地和公开任务评测，系统会自动统计成功率并在根目录生成 `eval_summary.md` 汇总报告：
 ```bash
-uv run python eval/run_eval.py --suite local      # 本地 10 条
+uv run python eval/run_eval.py --suite local     # 本地 10 条
 uv run python eval/run_eval.py --suite public    # 公开 5 条
 uv run python eval/run_eval.py --suite all       # 全部
 ```
+
+> ⚠️ **`--suite local` 需要先起本地静态服务**：本地 10 条 case 的目标页面是 `http://localhost:8080/*.html`，对应 `eval/pages/` 下的静态 HTML 集。跑 `--suite local`（或 `all`）前需另开一个终端起服务，否则所有 case 会因连接超时而集体判负：
+>
+> ```bash
+> uv run python -m http.server 8080 --directory eval/pages   # 标准库自带，零额外依赖
+> ```
+>
+> `--suite public` 的目标页面是公网真实网站，不依赖此服务。
 
 ---
 
@@ -126,6 +141,8 @@ uv run python eval/run_eval.py --suite all       # 全部
 | 证据完整性 (evidence_completeness) | 10/10 | 5/5 | — |
 
 运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
+
+> 💡 **消融实验**：在本地 10 项任务上对照 DOM-only vs DOM+Vision 两组，任务成功率打平（10/10），平均步数减少 20%（2.5 → 2.0，以 DOM-only 为基准），差异出现在两类任务上——需要确认页面状态变化的（标签页导航、表单填写）和纯文本/结构化抽取的（文本查找、表格抽取），说明视觉信号主要提升的是多模态 Agent 的**执行效率**而非**准确率**。完整报告含逐 case 步数对比与分析：[ablation_report.md](eval/ablation_report.md)
 
 ---
 
