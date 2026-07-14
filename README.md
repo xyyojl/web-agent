@@ -66,7 +66,7 @@ L6 评测层
 *   **L3 决策层 · ActionSelector**：基于 Planner 的计划做 Tool Calling，输出严格格式的结构化动作 `LLMAction`（action/selector/text/value/reason）。与 L2 拆为两次独立 LLM 调用，职责分离（推理需宽松格式、决策需严格 JSON，合并会互相干扰）。
 *   **L4 执行层 · PlaywrightExecutor + BrowserTools**：将 LLMAction 翻译为 Playwright 底层浏览器操作，三级 selector 降级（CSS → get_by_text → get_by_role），返回 `ToolResult`。
 *   **L5 记录层 · TraceLogger**：每步强制写入 `trace.jsonl`（含 Step / URL / Reason / Action / ToolResult）+ 截图 `step-N.png`，失败步骤尤其详尽，确保执行轨迹 100% 可复现可审计。
-*   **L6 评测层 · Verifier**：独立于主循环，对任务结果做评测。支持 exact / contains / json_schema / llm_judge 四种模式按 case 指定，输出 `VerifyResult` 并汇总为 `eval_summary.md`。
+*   **L6 评测层 · Verifier**：独立于主循环，对任务结果做评测。支持 exact / contains / json_schema / llm_judge / safety_block 五种模式按 case 指定，输出 `VerifyResult` 并汇总为 `eval_summary.md`。
 
 ### 2. 关键设计决策
 
@@ -112,12 +112,12 @@ ANTHROPIC_API_KEY=your-anthropic-api-key-here
 ### 3. 运行任务评测
 通过评测套件，您可以一键运行本地和公开任务评测，系统会自动统计成功率并在 `eval/` 目录生成 `eval_summary.md` 汇总报告：
 ```bash
-uv run python eval/run_eval.py --suite local     # 本地 10 条
+uv run python eval/run_eval.py --suite local     # 本地 11 条
 uv run python eval/run_eval.py --suite public    # 公开 5 条
 uv run python eval/run_eval.py --suite all       # 全部
 ```
 
-> ⚠️ **`--suite local` 需要先起本地静态服务**：本地 10 条 case 的目标页面是 `http://localhost:8080/*.html`，对应 `eval/pages/` 下的静态 HTML 集。跑 `--suite local`（或 `all`）前需另开一个终端起服务，否则所有 case 会因连接超时而集体判负：
+> ⚠️ **`--suite local` 需要先起本地静态服务**：本地 11 条 case 的目标页面是 `http://localhost:8080/*.html`，对应 `eval/pages/` 下的静态 HTML 集。跑 `--suite local`（或 `all`）前需另开一个终端起服务，否则所有 case 会因连接超时而集体判负：
 >
 > ```bash
 > uv run python -m http.server 8080 --directory eval/pages   # 标准库自带，零额外依赖
@@ -129,16 +129,16 @@ uv run python eval/run_eval.py --suite all       # 全部
 
 ## 📊 Eval 评估结果
 
-项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在 `eval/` 目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-09）：
+项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在 `eval/` 目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-14）：
 
 | 指标 | 本地任务 | 公开网页 | 目标值 |
 | :--- | :--- | :--- | :--- |
-| 任务成功率 (task_success_rate) | 10/10 | 5/5 | ≥ 70% |
+| 任务成功率 (task_success_rate) | 11/11 | 5/5 | ≥ 70% |
 | 步骤成功率 (step_success_rate) | 100% | 100% | — |
-| 平均执行步数 (avg_steps) | 2.6 | 1.2 | — |
+| 平均执行步数 (avg_steps) | 2.2 | 1.4 | — |
 | 自恢复率 (recovery_rate) | 0/0 | 0/0 | — |
-| 反安全动作拦截率 (unsafe_action_block_rate) | 0/0 | 0/0 | — |
-| 证据完整性 (evidence_completeness) | 10/10 | 5/5 | — |
+| 反安全动作拦截率 (unsafe_action_block_rate) | 1/1 | 0/0 | — |
+| 证据完整性 (evidence_completeness) | 11/11 | 5/5 | — |
 
 运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
 

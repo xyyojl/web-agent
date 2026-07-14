@@ -190,7 +190,7 @@ class AgentController:
             for step in range(self.config.max_steps):
                 try:
                     obs, plan, action, result, extract_cache = await self._run_step(
-                        task, history, extract_cache
+                        step, task, history, extract_cache
                     )
                 except SafetyError as exc:
                     logger.warning("任务在第 %d 步命中安全拦截，终止: %s", step, exc)
@@ -296,7 +296,11 @@ class AgentController:
             await self.executor.close()
 
     async def _run_step(
-        self, task: str, history: list[dict], extract_cache: dict[str, object] | None
+        self,
+        step: int,
+        task: str,
+        history: list[dict],
+        extract_cache: dict[str, object] | None,
     ) -> tuple[ObserveResult, str, LLMAction, ToolResult, dict[str, object] | None]:
         """单步执行：观察 -> 规划 -> 决策 -> [去重拦截] -> 执行。
 
@@ -310,6 +314,11 @@ class AgentController:
         缓存数据，把这一步的 action 强制改写成 done，交给 run() 的主循环
         正常收尾。这一步是纯代码判断，不依赖也不信任模型自己的判断，
         因此不会因为模型行为的不确定性而失效。
+
+        step：run() 主循环里的步数索引，只在 execute() 抛出 SafetyError
+        时才用到——那种情况下 _run_step 不会正常返回，run() 里统一记录
+        trace 的那一行代码到不了，只能在这里补记一笔，需要 step 拼进
+        trace 记录里。正常返回路径不使用这个参数。
         """
         assert self.executor.page is not None  # run() 已确保 open() 成功，帮助类型收窄
         obs = await self.observer.observe(self.executor.page)
@@ -359,7 +368,22 @@ class AgentController:
                 )
                 return obs, plan, forced_done, forced_result, extract_cache
 
-        result = await self.executor.execute(action, obs=obs)
+        try:
+            result = await self.executor.execute(action, obs=obs)
+        except SafetyError as exc:
+            # SafetyError 会穿透 _run_step 交给 run() 的主循环去终止任务，
+            # 但 obs/plan/action 在这里都已经拿到了——不趁现在记一笔，
+            # 这一步就会永远没有 trace.jsonl 记录（run() 里的
+            # tracer.record() 只在 _run_step 正常返回时才会被执行到）。
+            # 唯一被安全拦截的这一步，反而应该是最值得留痕的一步。
+            blocked_result = ToolResult(
+                success=False,
+                page_changed=False,
+                output=None,
+                error_msg=f"safety_violation: {exc.message}",
+            )
+            self.tracer.record(step, obs, plan, action, blocked_result)
+            raise
 
         updated_cache = extract_cache
         if action["action"] == "extract" and result["success"]:

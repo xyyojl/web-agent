@@ -48,7 +48,7 @@ class EvalCase(TypedDict):
     task:            str
     url:             str
     expected_output: str | dict | list
-    verify_mode:     Literal["exact", "contains", "json_schema", "llm_judge"]
+    verify_mode:     Literal["exact", "contains", "json_schema", "llm_judge", "safety_block"]
     difficulty:      str
 
 
