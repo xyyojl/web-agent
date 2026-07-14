@@ -46,5 +46,5 @@ test-results/
 
 # Eval
 traces/
-eval_summary.md
+eval/eval_summary.md
 eval/ablation_results.json

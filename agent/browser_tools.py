@@ -409,48 +409,26 @@ async def _format_links_info(page) -> str:
     return "\n".join(lines)
 
 
-# 匹配指令文本里用单引号或双引号包裹、且形如合法标识符（字母/数字/下划线，
-# 字母开头）的短 token——这类 token 在"抽取类"指令里几乎总是在明确指定
-# JSON 的 key 应该叫什么（如 "包含 'text' 和 'href' 两个字段"）。
-_QUOTED_IDENTIFIER_RE = re.compile(r"['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]")
-
-
-def _required_field_names(*texts: str | None) -> list[str]:
-    """从若干候选文本里解析出"明确要求的字段名"列表（保序去重）。
-
-    返回所有来源中带引号标识符的并集，仅用于字段名启发式校验，
-    不是完整语义解析。
-    """
-    seen: dict[str, None] = {}
-    for text in texts:
-        if not text:
-            continue
-        for match in _QUOTED_IDENTIFIER_RE.finditer(text):
-            seen.setdefault(match.group(1), None)
-    return list(seen.keys())
-
-
-def _actual_field_names(parsed: object) -> set[str] | None:
-    """从解析后的 JSON 里取出实际出现的 key 集合，用于和要求的字段名比对。"""
-    if isinstance(parsed, dict):
-        return set(parsed.keys())
-    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-        return set(parsed[0].keys())
-    return None
-
-
 async def browser_extract(
     page,
     instruction: str,
     observer: BrowserStateObserver,
     config: AgentConfig,
     obs: ObserveResult | None = None,
-    task: str | None = None,
 ) -> ToolResult:
     """根据当前页面抽取结构化 JSON。
 
-    优先从 task 解析要求的字段名，instruction 作为补充来源。
-    同时重试 LLM 调用失败以及模型输出异常（如非法 JSON、字段名不匹配）。
+    只重试两类"客观可判定"的失败：LLM 调用本身失败、输出不是合法 JSON。
+    不再在这里对字段名做启发式校验——原实现从 instruction/task 里用正则
+    抓取带引号的 token 当作"必须出现的字段名"，但 instruction 是
+    Planner/ActionSelector 当场转述的自由文本，其中举例用的引号内容
+    （比如 "字段 'name'（如 'Alice'）"里的 'Alice'）和真正的字段名在
+    正则层面无法区分，会被一并当成"必需字段"，导致即使模型输出的
+    name/score 完全正确，也会被误判为"缺字段"而不断重试、甚至把模型
+    误导去输出根本不该存在的字段。是否符合预期的字段结构，交给任务
+    结束后 Verifier 基于 EvalCase.verify_mode（如 json_schema）统一
+    校验即可——那一层校验源头是 case 文件里确定性的 expected_output，
+    不依赖对自由文本的正则猜测，更可靠。
     """
     if obs is None:
         try:
@@ -469,11 +447,6 @@ async def browser_extract(
         visible_text_summary=obs["visible_text_summary"],
         links_info=await _format_links_info(page),
     )
-    current_prompt = base_prompt
-
-    # 校验指令中明确要求的字段名（如 "text"、"href"），
-    # 避免模型输出语义正确但字段名错误的 JSON。
-    required_fields = _required_field_names(task, instruction)
 
     max_attempts = max(1, config.llm_retry)
     last_error_msg = "未知错误"
@@ -482,7 +455,7 @@ async def browser_extract(
         will_retry = attempt + 1 < max_attempts
 
         try:
-            raw_output = await _call_llm_extract(current_prompt, config, system=EXTRACTOR_SYSTEM)
+            raw_output = await _call_llm_extract(base_prompt, config, system=EXTRACTOR_SYSTEM)
         except LLMError as exc:
             # _call_llm_extract 内部已经把网络层的重试耗尽了，这里再重试
             # 意味着重新发起一整轮新的请求（而非在同一轮里继续），仍然有机会
@@ -527,39 +500,6 @@ async def browser_extract(
                 await asyncio.sleep(2**attempt)
                 continue
             return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
-
-        if required_fields:
-            actual_fields = _actual_field_names(parsed)
-            missing = (
-                [f for f in required_fields if f not in actual_fields]
-                if actual_fields is not None
-                else []
-            )
-            if missing:
-                last_error_msg = (
-                    f"输出字段名与指令要求不符：指令明确要求字段 {required_fields}，"
-                    f"实际输出的字段是 {sorted(actual_fields or [])}，"
-                    f"缺少 {missing}"
-                )
-                logger.warning(
-                    "browser_extract 字段名校验失败（第 %d/%d 次尝试）: %s%s",
-                    attempt + 1, max_attempts, last_error_msg,
-                    "，即将重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    # 字段名错误反馈给模型，提高下一次重试命中率
-                    current_prompt = (
-                        f"{base_prompt}\n\n"
-                        f"[纠错提示] 你上一次的输出使用的字段名是 "
-                        f"{sorted(actual_fields or [])}，但指令明确要求的字段名是 "
-                        f"{required_fields}（必须原样使用，不能替换成同义词，如 "
-                        "href≠url，text≠link_text）。上一次的错误输出：\n"
-                        f"{cleaned[:1000]}\n"
-                        "请重新输出，字段名严格使用指令要求的原始拼写。"
-                    )
-                    await asyncio.sleep(2**attempt)
-                    continue
-                return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
 
         result_payload = {"url": obs["url"], "data": parsed}
         return ToolResult(

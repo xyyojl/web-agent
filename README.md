@@ -110,7 +110,7 @@ ANTHROPIC_API_KEY=your-anthropic-api-key-here
 ```
 
 ### 3. 运行任务评测
-通过评测套件，您可以一键运行本地和公开任务评测，系统会自动统计成功率并在根目录生成 `eval_summary.md` 汇总报告：
+通过评测套件，您可以一键运行本地和公开任务评测，系统会自动统计成功率并在 `eval/` 目录生成 `eval_summary.md` 汇总报告：
 ```bash
 uv run python eval/run_eval.py --suite local     # 本地 10 条
 uv run python eval/run_eval.py --suite public    # 公开 5 条
@@ -129,7 +129,7 @@ uv run python eval/run_eval.py --suite all       # 全部
 
 ## 📊 Eval 评估结果
 
-项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在根目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-09）：
+项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在 `eval/` 目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-09）：
 
 | 指标 | 本地任务 | 公开网页 | 目标值 |
 | :--- | :--- | :--- | :--- |

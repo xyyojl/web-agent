@@ -43,7 +43,7 @@ from eval_core import (  #（sys.path 必须先于这行执行）
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_PATH = os.path.join(_PROJECT_ROOT, "eval_summary.md")
+_SUMMARY_PATH = os.path.join(_PROJECT_ROOT, "eval", "eval_summary.md")
 _SUITE_LABELS = {"local": "本地任务", "public": "公开网页"}
 _METRIC_ORDER = (
     "task_success_rate",

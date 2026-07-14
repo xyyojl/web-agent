@@ -94,7 +94,7 @@ class PlaywrightExecutor:
             )
 
     async def execute(
-        self, action: LLMAction, obs: ObserveResult | None = None, task: str | None = None
+        self, action: LLMAction, obs: ObserveResult | None = None
     ) -> ToolResult:
         """按 action['action'] 分发到对应的 browser_tools 函数。
 
@@ -105,12 +105,6 @@ class PlaywrightExecutor:
         ——避免 browser_extract 内部再重新 observe 一次（重复扫描页面 +
         额外占用一个截图编号，导致 trace.jsonl 里的 screenshot 字段和
         实际截图文件编号对不上）。其余动作不需要 obs，传 None 即可。
-
-        task：原始任务文本（EvalCase.task），目前只有 extract 会用到——
-        browser_extract 内部做字段名确定性校验时，优先用这个未经任何一次
-        LLM 转述的原文解析"引号点名的必需字段名"，比只依赖 action 里
-        ActionSelector 自己转述的 instruction 更可靠（模型转述时可能弄丢
-        引号，导致校验被静默跳过）。其余动作不需要 task，传 None 即可。
         """
         if self.page is None:
             return ToolResult(
@@ -130,7 +124,7 @@ class PlaywrightExecutor:
             )
 
         try:
-            return await self._dispatch(action_name, action, obs, task)
+            return await self._dispatch(action_name, action, obs)
         except SafetyError:
             # 同 open()：安全拦截刻意穿透，不在此处转换成 ToolResult。
             raise
@@ -145,7 +139,6 @@ class PlaywrightExecutor:
         action_name: str,
         action: LLMAction,
         obs: ObserveResult | None = None,
-        task: str | None = None,
     ) -> ToolResult:
         """真正的分发逻辑，拆成独立方法便于 execute() 统一做异常兜底。"""
         assert self.page is not None  # execute() 已确保非空，帮助类型检查器收窄
@@ -198,10 +191,10 @@ class PlaywrightExecutor:
                 # 多占一个截图编号的现象。
                 logger.warning("execute(extract) 未收到 obs，退化为内部重新 observe")
                 return await browser_extract(
-                    self.page, instruction, self.observer, self.config, task=task
+                    self.page, instruction, self.observer, self.config
                 )
             return await browser_extract(
-                self.page, instruction, self.observer, self.config, obs=obs, task=task
+                self.page, instruction, self.observer, self.config, obs=obs
             )
 
         if action_name == "select":

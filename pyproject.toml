@@ -5,7 +5,9 @@ description = "Web Agent Project"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.115.0",
+    "anthropic>=0.116.0",
+    "genson>=1.4.0,<2",
+    "jsonschema>=4.26.0,<5",
     "playwright>=1.61.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",

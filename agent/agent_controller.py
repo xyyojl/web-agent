@@ -359,7 +359,7 @@ class AgentController:
                 )
                 return obs, plan, forced_done, forced_result, extract_cache
 
-        result = await self.executor.execute(action, obs=obs, task=task)
+        result = await self.executor.execute(action, obs=obs)
 
         updated_cache = extract_cache
         if action["action"] == "extract" and result["success"]:
