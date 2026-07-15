@@ -195,6 +195,12 @@ class AgentController:
                     fail_reason=f"open_failed: {open_result['error_msg']}",
                 )
 
+            # open() 可能耗时不短（page.goto 重试、登录页信号命中时
+            # ask_human() 阻塞等真人从终端输入选择），这些时间和"agent
+            # 这一步跑得快不快"无关，重置计时基准，避免被计入第一步的
+            # duration_ms。
+            self.tracer.reset_step_timer()
+
             for step in range(self.config.max_steps):
                 try:
                     obs, plan, action, result, extract_cache = await self._run_step(

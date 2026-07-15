@@ -26,7 +26,22 @@ class TraceLogger:
         self.report_path = os.path.join(self.run_dir, "report.json")
 
         self._screenshot_step = 0
-        # 用于计算每步 duration_ms：以上一次 record() 结束时刻为基准
+        # 用于计算每步 duration_ms：以上一次 record() 结束时刻为基准。
+        # 这里在构造时先设一个兜底值——如果调用方在 open() 成功后没有调用
+        # reset_step_timer()，第一步的 duration_ms 会从这一刻（TraceLogger
+        # 构造时刻）算起，包含构造之后到第一次 record() 之间的全部耗时。
+        self._last_time = time.monotonic()
+
+    def reset_step_timer(self) -> None:
+        """把 duration_ms 的计时基准重置为当前时刻。
+
+        必须在 browser_open()（page.goto + 重试 + 登录页人工确认）成功
+        结束、真正进入"观察->规划->决策->执行"主循环之前调用一次，否则
+        第一步的 duration_ms 会把 open() 的耗时也算进去——包括登录页信号
+        命中时 ask_human() 阻塞等待真人从终端输入选择的时间，这个等待
+        时长和 agent 本身跑得快不快毫无关系，混进第一步的耗时里会让它
+        变成一个和"这一步实际花了多久"脱节的离群值。
+        """
         self._last_time = time.monotonic()
 
     def next_screenshot_path(self) -> str:
