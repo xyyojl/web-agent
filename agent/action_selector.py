@@ -7,12 +7,9 @@ selector 是否真实存在于页面的校验——那是 browser_click/browser_
 执行时的职责。
 """
 
-import asyncio
 import logging
-import os
 from typing import Literal, cast
 
-import anthropic
 from anthropic.types import (
     Message,
     MessageParam,
@@ -22,7 +19,7 @@ from anthropic.types import (
 )
 
 from agent.config import AgentConfig
-from agent.exceptions import LLMError
+from agent.llm_client import LLMClient, LLMOutputRetry
 from agent.prompts import SELECTOR_SYSTEM, SELECTOR_TOOLS
 from agent.types import LLMAction, ObserveResult
 from agent.vision import build_vision_user_content
@@ -153,18 +150,7 @@ class ActionSelector:
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
-        self._client: anthropic.AsyncAnthropic | None = None
-
-    def _get_client(self) -> anthropic.AsyncAnthropic:
-        if self._client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise LLMError(
-                    "未配置 ANTHROPIC_API_KEY，无法调用 ActionSelector", stage="request"
-                )
-            self._client = anthropic.AsyncAnthropic()
-        assert self._client is not None  # 帮助静态类型检查器收窄为非 Optional
-        return self._client
+        self._llm = LLMClient(config)
 
     async def select(
         self,
@@ -174,13 +160,13 @@ class ActionSelector:
     ) -> LLMAction:
         """调用 LLM（Tool Calling 模式），返回一次结构化动作。
 
-        失败时按 1s / 2s / 4s ... 指数退避重试，最多 config.llm_retry 次，
-        超过后抛出 LLMError。以下情况均视为一次失败并触发 retry：
-        网络/API 错误、response.content 为空或无 tool_use block、
-        tool_use.name 不在合法工具集合内、input 字段缺失或取值非法。
+        失败时按 1s / 2s / 4s ... 指数退避重试（429 固定等待
+        config.rate_limit_delay 秒），最多 config.llm_retry 次，超过后
+        抛出 LLMError（重试骨架见 agent/llm_client.py）。以下情况均视为
+        一次失败并触发 retry：网络/API 错误、response.content 为空或无
+        tool_use block、tool_use.name 不在合法工具集合内、input 字段
+        缺失或取值非法。
         """
-        client = self._get_client()
-
         user_content = build_vision_user_content(obs, f"行动计划：{plan}\n\n{_format_observation(obs)}")
         messages: list[MessageParam] = cast(
             "list[MessageParam]", [*history, {"role": "user", "content": user_content}]
@@ -191,92 +177,27 @@ class ActionSelector:
         # 否则会退化成 Message | AsyncStream[...] 联合类型警告。
         tool_choice: ToolChoiceAnyParam = {"type": "any"}
 
-        last_exc: Exception | None = None
-        max_attempts = max(1, self.config.llm_retry)
-
-        for attempt in range(max_attempts):
-            will_retry = attempt + 1 < max_attempts
-
-            try:
-                # tool_choice={"type": "any"} 强制模型必须调用其中一个工具，
-                # 而不是退化成纯文本回复——从源头降低“content 里没有 tool_use”的概率。
-                message: Message = await client.messages.create(
-                    model=self.config.model,
-                    max_tokens=1024,
-                    timeout=self.config.llm_timeout,
-                    system=SELECTOR_SYSTEM,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    messages=messages,
-                )
-            except anthropic.RateLimitError as exc:
-                # 429 速率限制：免费模型速率窗口通常为 1 分钟，
-                # 短时间指数退避反而加剧频率压力，改用固定的 rate_limit_delay 则更可靠。
-                last_exc = exc
-                wait_secs = self.config.rate_limit_delay
-                logger.warning(
-                    "ActionSelector LLM 调用失败（第 %d/%d 次尝试）: %s%s",
-                    attempt + 1,
-                    max_attempts,
-                    exc,
-                    f"，即将等待 {wait_secs}s 后重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(wait_secs)
-                continue
-            except anthropic.APIError as exc:
-                last_exc = exc
-                logger.warning(
-                    "ActionSelector LLM 调用失败（第 %d/%d 次尝试）: %s%s",
-                    attempt + 1,
-                    max_attempts,
-                    exc,
-                    "，即将重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(2**attempt)  # 1s / 2s / 4s / ...
-                continue
-
+        def _parse_action(message: Message) -> LLMAction:
             tool_use = _extract_tool_use(message)
             if tool_use is None:
-                last_exc = LLMError(
-                    "response.content 为空或未找到 tool_use block", stage="parse"
-                )
-                logger.warning(
-                    "ActionSelector 未解析到 tool_use（第 %d/%d 次尝试）%s",
-                    attempt + 1,
-                    max_attempts,
-                    "，即将重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(2**attempt)
-                continue
-
+                raise LLMOutputRetry("response.content 为空或未找到 tool_use block")
             try:
-                action = _build_llm_action(tool_use)
+                return _build_llm_action(tool_use)
             except (ValueError, TypeError, KeyError) as exc:
                 # ValueError: _get_str_field/字段校验主动抛出的“非法值”。
                 # TypeError/KeyError: tool_use.input 结构本身不符合预期
                 # （例如 SDK 返回的 input 不是预期的 dict 结构、字段缺失导致的
                 # 底层 dict 操作异常）——同样视为一次“LLM 返回非法 action”，
-                # 统一归一为 LLMError 触发 retry，而不是让整条任务链路崩溃。
-                last_exc = LLMError(f"tool_use 解析失败: {exc}", stage="parse")
-                logger.warning(
-                    "ActionSelector tool_use 解析失败（第 %d/%d 次尝试）: %s%s",
-                    attempt + 1,
-                    max_attempts,
-                    exc,
-                    "，即将重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(2**attempt)
-                continue
+                # 统一触发 retry，而不是让整条任务链路崩溃。
+                raise LLMOutputRetry(f"tool_use 解析失败: {exc}") from exc
 
-            return action
-
-        last_exc_desc = last_exc.message if isinstance(last_exc, LLMError) else str(last_exc)
-        raise LLMError(
-            f"ActionSelector LLM 请求连续失败 {max_attempts} 次: {last_exc_desc}",
-            stage="request",
-            retry_count=max_attempts,
+        return await self._llm.call_with_retry(
+            caller_name="ActionSelector",
+            parse_response=_parse_action,
+            model=self.config.model,
+            max_tokens=1024,
+            system=SELECTOR_SYSTEM,
+            tools=tools,
+            tool_choice=tool_choice,
+            messages=messages,
         )

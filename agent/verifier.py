@@ -6,18 +6,17 @@
 verify() 本身不会抛出未捕获异常。
 """
 
-import asyncio
 import json
 import logging
-import os
 import re
 
-import anthropic
 import jsonschema
 from anthropic.types import Message, MessageParam, TextBlock
 from genson import SchemaBuilder
 
 from agent.config import AgentConfig
+from agent.exceptions import LLMError
+from agent.llm_client import LLMClient, LLMOutputRetry
 from agent.prompts import JUDGE_SYSTEM
 from agent.types import AgentResult, EvalCase, VerifyResult
 
@@ -127,16 +126,7 @@ class Verifier:
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
-        self._client: anthropic.AsyncAnthropic | None = None
-
-    def _get_client(self) -> anthropic.AsyncAnthropic:
-        if self._client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise RuntimeError("未配置 ANTHROPIC_API_KEY，无法调用 LLM Judge")
-            self._client = anthropic.AsyncAnthropic()
-        assert self._client is not None  # 帮助静态类型检查器收窄为非 Optional
-        return self._client
+        self._llm = LLMClient(config)
 
     async def verify(self, case: EvalCase, result: AgentResult) -> VerifyResult:
         """按 case['verify_mode'] 分发到对应的校验方法。"""
@@ -254,81 +244,38 @@ class Verifier:
 
     async def _verify_llm_judge(self, case: EvalCase, result: AgentResult) -> VerifyResult:
         """调用 LLM Judge 打分。调用异常、返回内容为空、JSON 解析失败、
-        字段缺失或类型不对——这四类失败都视为一次"格式抖动"，统一纳入
-        同一套重试逻辑；只有 config.llm_retry 次全部用尽仍未拿到合法结果，
-        才最终退化为 VerifyResult(success=False, ...)。verify() 本身
-        不会因 llm_judge 抛出未捕获异常。
+        字段缺失或类型不对——这四类失败都视为一次"格式抖动"，通过
+        LLMOutputRetry 统一纳入 agent/llm_client.py 的重试骨架；只有
+        config.llm_retry 次全部用尽仍未拿到合法结果，才最终退化为
+        VerifyResult(success=False, ...)。verify() 本身不会因 llm_judge
+        抛出未捕获异常。
 
         对 429 速率限制错误会等待 config.rate_limit_delay 秒后重试；
         其余情况按指数退避（2 ** attempt 秒）重试。
         """
-        try:
-            client = self._get_client()
-        except RuntimeError as exc:
-            return VerifyResult(case_id=case["id"], success=False, reason=str(exc), confidence=0.0)
-
         prompt = (
             f"任务描述: {case['task']}\n"
             f"预期输出: {_stringify(case['expected_output'])}\n"
             f"实际输出: {_stringify(result['output'])}\n"
         )
-
         messages: list[MessageParam] = [MessageParam(role="user", content=prompt)]
-        max_attempts = max(1, self.config.llm_retry)
-        last_failure_reason = "未知错误"
 
-        for attempt in range(max_attempts):
-            will_retry = attempt + 1 < max_attempts
-
-            try:
-                message: Message = await client.messages.create(
-                    model=self.config.model,
-                    # 512 tokens 在实测中不够用。
-                    # 调大到 1024 留出安全余量，仍远小于会显著增加延迟/成本的量级。
-                    max_tokens=1024,
-                    timeout=self.config.llm_timeout,
-                    system=JUDGE_SYSTEM,
-                    messages=messages,
-                )
-            except anthropic.RateLimitError as exc:
-                last_failure_reason = f"LLM Judge 调用失败: {exc}"
-                wait_secs = self.config.rate_limit_delay
-                logger.warning(
-                    "LLM Judge 调用失败（第 %d/%d 次尝试）: %s%s",
-                    attempt + 1, max_attempts, exc,
-                    f"，即将等待 {wait_secs}s 后重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(wait_secs)
-                continue
-            except anthropic.APIError as exc:
-                last_failure_reason = f"LLM Judge 调用失败: {exc}"
-                logger.warning("LLM Judge 调用失败（第 %d/%d 次尝试）: %s%s",
-                               attempt + 1, max_attempts, exc,
-                               "，即将重试" if will_retry else "，已达重试上限")
-                if will_retry:
-                    await asyncio.sleep(2 ** attempt)
-                continue
-
+        def _parse_judge(message: Message) -> dict:
             # 以下都是"API 调用成功，但输出内容有格式问题"的场景：
             # 空内容 / 非法 JSON（且兜底正则也未命中）/ 字段缺失或类型不对。
-            # 三种情况都视为一次可重试的格式抖动，而不是立即判负。
-
+            # 三种情况都通过 LLMOutputRetry 统一交给 LLMClient 重试，
+            # 而不是立即判负。
             raw_text = "".join(
                 block.text for block in message.content if isinstance(block, TextBlock)
             ).strip()
 
             if not raw_text:
                 block_types = [type(block).__name__ for block in message.content]
-                last_failure_reason = "LLM Judge 多次重试后仍返回空内容"
                 logger.warning(
-                    "LLM Judge 返回内容为空（第 %d/%d 次尝试），stop_reason=%s，content=%s%s",
-                    attempt + 1, max_attempts, message.stop_reason, block_types,
-                    "，即将重试" if will_retry else "，已达重试上限",
+                    "LLM Judge 返回内容为空，stop_reason=%s，content=%s",
+                    message.stop_reason, block_types,
                 )
-                if will_retry:
-                    await asyncio.sleep(2 ** attempt)
-                continue
+                raise LLMOutputRetry("LLM Judge 多次重试后仍返回空内容")
 
             cleaned = raw_text
             if cleaned.startswith("```"):
@@ -339,36 +286,20 @@ class Verifier:
                 parsed = json.loads(cleaned)
             except json.JSONDecodeError as exc:
                 repaired = _repair_judge_json(raw_text)
-                if repaired is not None:
-                    logger.warning(
-                        "LLM Judge 输出不是合法 JSON（%s），已通过兜底修复正则恢复三个字段，"
-                        "原始输出: %r",
-                        exc,
-                        raw_text,
-                    )
-                    parsed = repaired
-                else:
-                    last_failure_reason = f"LLM Judge 输出不是合法 JSON: {raw_text[:200]!r}"
-                    logger.warning(
-                        "LLM Judge 输出无法解析为 JSON 且兜底修复也未命中（第 %d/%d 次尝试）: "
-                        "%s；原始输出: %r%s",
-                        attempt + 1, max_attempts, exc, raw_text,
-                        "，即将重试" if will_retry else "，已达重试上限",
-                    )
-                    if will_retry:
-                        await asyncio.sleep(2 ** attempt)
-                    continue
+                if repaired is None:
+                    raise LLMOutputRetry(
+                        f"LLM Judge 输出无法解析为 JSON 且兜底修复也未命中: {raw_text[:200]!r}"
+                    ) from exc
+                logger.warning(
+                    "LLM Judge 输出不是合法 JSON（%s），已通过兜底修复正则恢复三个字段，"
+                    "原始输出: %r",
+                    exc,
+                    raw_text,
+                )
+                parsed = repaired
 
             if not isinstance(parsed, dict):
-                last_failure_reason = f"LLM Judge 输出不是 JSON 对象: {parsed!r}"
-                logger.warning(
-                    "LLM Judge 输出不是 JSON 对象（第 %d/%d 次尝试）: %r%s",
-                    attempt + 1, max_attempts, parsed,
-                    "，即将重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(2 ** attempt)
-                continue
+                raise LLMOutputRetry(f"LLM Judge 输出不是 JSON 对象: {parsed!r}")
 
             judged_success = parsed.get("success")
             judged_reason = parsed.get("reason")
@@ -380,27 +311,32 @@ class Verifier:
                 or not isinstance(judged_confidence, (int, float))
                 or isinstance(judged_confidence, bool)
             ):
-                last_failure_reason = f"LLM Judge 输出字段缺失或类型不对: {parsed!r}"
-                logger.warning(
-                    "LLM Judge 输出字段缺失或类型不对（第 %d/%d 次尝试）: %r%s",
-                    attempt + 1, max_attempts, parsed,
-                    "，即将重试" if will_retry else "，已达重试上限",
-                )
-                if will_retry:
-                    await asyncio.sleep(2 ** attempt)
-                continue
+                raise LLMOutputRetry(f"LLM Judge 输出字段缺失或类型不对: {parsed!r}")
 
+            return parsed
+
+        try:
+            judge_output = await self._llm.call_with_retry(
+                caller_name="LLM Judge",
+                parse_response=_parse_judge,
+                model=self.config.model,
+                # 512 tokens 在实测中不够用。
+                # 调大到 1024 留出安全余量，仍远小于会显著增加延迟/成本的量级。
+                max_tokens=1024,
+                system=JUDGE_SYSTEM,
+                messages=messages,
+            )
+        except LLMError as llm_exc:
+            # 缺 API Key、网络/API 错误耗尽重试、输出格式问题耗尽重试——
+            # 统一在这里退化成 VerifyResult(success=False, ...)，
+            # verify() 本身不会因 llm_judge 抛出未捕获异常。
             return VerifyResult(
-                case_id=case["id"],
-                success=judged_success,
-                reason=judged_reason,
-                confidence=float(judged_confidence),
+                case_id=case["id"], success=False, reason=llm_exc.message, confidence=0.0
             )
 
-        # 全部重试耗尽，仍未拿到一次完全合法的 Judge 输出
         return VerifyResult(
             case_id=case["id"],
-            success=False,
-            reason=last_failure_reason,
-            confidence=0.0,
+            success=judge_output["success"],
+            reason=judge_output["reason"],
+            confidence=float(judge_output["confidence"]),
         )

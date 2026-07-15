@@ -25,6 +25,7 @@ from agent.exceptions import (
     SafetyError,
     WebAgentError,
 )
+from agent.llm_client import LLMClient, LLMOutputRetry
 from agent.observer import BrowserStateObserver
 from agent.planner import WebPlanner
 from agent.action_selector import ActionSelector
@@ -71,6 +72,8 @@ __all__ = [
     # 执行层（基础设施）
     "TraceLogger",
     "BrowserStateObserver",
+    "LLMClient",
+    "LLMOutputRetry",
     # 编排层（推理 → 决策 → 执行 → 编排 → 验证）
     "WebPlanner",
     "ActionSelector",

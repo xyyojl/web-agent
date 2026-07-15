@@ -10,7 +10,6 @@
 import asyncio
 import json
 import logging
-import os
 import re
 from typing import Awaitable, Callable, Literal
 
@@ -22,6 +21,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError, LLMError, SafetyError
+from agent.llm_client import LLMClient
 from agent.observer import BrowserStateObserver
 from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL
 from agent.tracer import TraceLogger
@@ -328,62 +328,35 @@ async def browser_type(page, selector: str, text: str) -> ToolResult:
     return ToolResult(success=True, page_changed=False, output=selector, error_msg=None)
 
 
-# 复用单一客户端实例，避免每次调用都重新建立连接池。
-# 使用 AsyncAnthropic 而非同步 Anthropic：browser_extract 运行在 asyncio 事件循环中，
-# 若用同步客户端发起网络请求，会阻塞整个事件循环，导致其他并发协程（如浏览器 I/O）卡住。
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise LLMError("未配置 ANTHROPIC_API_KEY，无法调用 LLM 抽取", stage="request")
-        _client = anthropic.AsyncAnthropic()
-    assert _client is not None  # 帮助静态类型检查器收窄为非 Optional
-    return _client
-
-
 async def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None = None) -> str:
-    """调用 Anthropic Messages API（官方 SDK，异步客户端），返回模型原始文本输出。
+    """调用 Anthropic Messages API，返回模型原始文本输出。
 
     独立为模块级函数（而非内嵌在 browser_extract 中）便于测试时替换/打桩。
-    SDK 自带超时与网络层重试，这里在其上再叠加一层业务级重试（config.llm_retry），
-    用于覆盖偶发的可重试错误。
+    重试骨架委托给 agent/llm_client.py 的 LLMClient（懒加载客户端、429
+    固定等待、其余错误指数退避）——LLMClient 内部的底层 Anthropic 客户端
+    是进程级单例，这里每次调用都新建一个 LLMClient(config) 也不会重复
+    建连接池，只是持有 config 引用的轻量包装。
 
     system: 角色约束（如 agent.prompts.EXTRACTOR_SYSTEM），通过 Anthropic
         Messages API 的 system 参数单独传递，不与用户消息拼在一起，
         便于角色指令被模型稳定遵循，也便于不同调用方复用同一份 prompt 定义。
     """
-    client = _get_client()
-
     messages: list[MessageParam] = [{"role": "user", "content": prompt}]
 
-    last_exc: Exception | None = None
-    for _ in range(max(1, config.llm_retry)):
-        try:
-            # 直接以关键字参数调用（而非 **kwargs 拼装 dict），才能让类型检查器
-            # 根据重载签名正确推断出非流式返回类型 Message，而不是
-            # Message | Stream[...] 联合类型；system 未提供时传 NOT_GIVEN 哨兵值
-            # （而不是省略该参数），同样是为了保持这是一次静态可解析的直接调用。
-            message: Message = await client.messages.create(
-                model=config.model,
-                max_tokens=2048,
-                timeout=config.llm_timeout,
-                system=system if system else anthropic.NOT_GIVEN,
-                messages=messages,
-            )
-        except anthropic.APIError as exc:
-            last_exc = exc
-            continue
-
+    def _parse_extract_text(message: Message) -> str:
         # 只有 TextBlock 才有 .text 属性，其余 block 类型（ThinkingBlock/ToolUseBlock 等）
         # 需要先用 isinstance 收窄类型，避免静态检查器报“成员不存在”。
         text_parts = [block.text for block in message.content if isinstance(block, TextBlock)]
         return "".join(text_parts)
 
-    raise LLMError(f"LLM 请求失败: {last_exc}", stage="request", retry_count=config.llm_retry)
+    return await LLMClient(config).call_with_retry(
+        caller_name="browser_extract",
+        parse_response=_parse_extract_text,
+        model=config.model,
+        max_tokens=2048,
+        system=system if system else anthropic.NOT_GIVEN,
+        messages=messages,
+    )
 
 
 async def _format_links_info(page) -> str:
