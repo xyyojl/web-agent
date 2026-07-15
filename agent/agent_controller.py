@@ -110,15 +110,23 @@ def _find_element_role(obs: ObserveResult, selector: str | None) -> str | None:
 
 
 def _extract_page_key(obs: ObserveResult) -> tuple[str, str]:
-    """用 (url, visible_text_summary) 作为"页面状态是否发生变化"的判定依据。
+    """用 (url, text_hash) 作为"页面状态是否发生变化"的判定依据。
 
     extract 是纯读取动作，不改变页面；只要这两项都没变，说明自上次成功
     extract 以来页面没有任何新信息出现——在这种前提下，无论 Planner/
     ActionSelector 这次给 extract 起的 instruction 措辞跟上次差多少
     （遣词造句差异不代表页面上真的有"新的可提取内容"），第二次调用都
     不可能从同一份静态文本里榨出实质不同的正确数据，纯属重复劳动。
+
+    这里特意用 text_hash 而不是 visible_text_summary：后者会被
+    observer 截断到 obs_text_limit（默认 3000）字符，如果两次页面
+    截断后的前缀恰好相同，但真实变化发生在截断点之后（比如表格分页
+    追加了新行），拿截断后的文本比较会把这次变化误判为"页面没变"，
+    错误地跳过本该重新执行的 extract。text_hash 是在 observer 截断
+    之前，对完整可见文本算出来的 hash，覆盖不到截断丢掉的部分不存在，
+    能避免这种假阳性。
     """
-    return obs["url"], obs["visible_text_summary"]
+    return obs["url"], obs["text_hash"]
 
 
 def _unwrap_extract_data(output: str | None) -> object | None:

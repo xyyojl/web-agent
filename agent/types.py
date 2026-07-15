@@ -12,6 +12,7 @@ class ObserveResult(TypedDict):
     url:                  str
     title:                str
     visible_text_summary: str
+    text_hash:            str
     interactive_elements: list[Element]
     screenshot_path:      str
     screenshot_b64:       NotRequired[str | None]

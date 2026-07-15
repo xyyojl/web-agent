@@ -5,6 +5,7 @@
 """
 
 import base64
+import hashlib
 import logging
 import re
 
@@ -291,6 +292,13 @@ class BrowserStateObserver:
         title = await page.title()
 
         raw_text: str = await page.evaluate(_EXTRACT_TEXT_JS)
+        # 必须在截断之前对完整 raw_text 求 hash：visible_text_summary 会被
+        # 截到 obs_text_limit（默认 3000）字符，如果拿截断后的文本去判断
+        # "页面是否变化"（见 agent_controller._extract_page_key），两次
+        # observe 只要前 3000 字符恰好相同，截断之后发生的真实变化
+        # （比如表格追加了新行）就会被吞掉，出现假阳性。text_hash 覆盖
+        # 完整文本，不受截断影响。
+        text_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
         visible_text_summary = self._truncate_text(raw_text, self.config.obs_text_limit)
 
         raw_elements: list[dict] = await page.evaluate(
@@ -320,6 +328,7 @@ class BrowserStateObserver:
             url=url,
             title=title,
             visible_text_summary=visible_text_summary,
+            text_hash=text_hash,
             interactive_elements=interactive_elements,
             screenshot_path=screenshot_path,
         )
