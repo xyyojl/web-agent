@@ -150,6 +150,10 @@ class LLMClient:
                 continue
 
         last_exc_desc = last_exc.message if isinstance(last_exc, LLMError) else str(last_exc)
+        logger.error(
+            "%s LLM 请求连续失败 %d 次，放弃重试: %s",
+            caller_name, max_attempts, last_exc_desc,
+        )
         raise LLMError(
             f"{caller_name} LLM 请求连续失败 {max_attempts} 次: {last_exc_desc}",
             stage="request",

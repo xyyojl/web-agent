@@ -13,14 +13,13 @@ import logging
 import re
 from typing import Awaitable, Callable, Literal
 
-import anthropic
-from anthropic.types import Message, MessageParam, TextBlock
+from anthropic.types import Message, TextBlock
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError, LLMError, SafetyError
-from agent.llm_client import LLMClient
+from agent.llm_client import LLMClient, LLMOutputRetry
 from agent.observer import BrowserStateObserver
 from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL
 from agent.tracer import TraceLogger
@@ -323,35 +322,36 @@ async def browser_type(page, selector: str, text: str) -> ToolResult:
     return ToolResult(success=True, page_changed=False, output=selector, error_msg=None)
 
 
-async def _call_llm_extract(prompt: str, config: AgentConfig, system: str | None = None) -> str:
-    """调用 Anthropic Messages API，返回模型原始文本输出。
+def _parse_extract_response(message: Message) -> object:
+    """从 Extractor 返回的 Message 里解析出结构化 JSON（LLMClient 的 parse_response 回调）。
 
-    独立为模块级函数（而非内嵌在 browser_extract 中）便于测试时替换/打桩。
-    重试骨架委托给 agent/llm_client.py 的 LLMClient（懒加载客户端、429
-    固定等待、其余错误指数退避）——LLMClient 内部的底层 Anthropic 客户端
-    是进程级单例，这里每次调用都新建一个 LLMClient(config) 也不会重复
-    建连接池，只是持有 config 引用的轻量包装。
+    合并了此前分两处处理的"这次输出不算数"情况：网络层失败已经由
+    LLMClient.call_with_retry() 兜底，这里只处理"HTTP 成功但内容不可用"的
+    情况——非法 JSON 通过 raise LLMOutputRetry 交给 call_with_retry() 同一组
+    config.llm_retry 预算重试。
 
-    system: 角色约束（如 agent.prompts.EXTRACTOR_SYSTEM），通过 Anthropic
-        Messages API 的 system 参数单独传递，不与用户消息拼在一起，
-        便于角色指令被模型稳定遵循，也便于不同调用方复用同一份 prompt 定义。
+    此前 browser_extract 是自己在外层又套了一圈 max_attempts 循环包住
+    对 LLMClient 的调用：LLMClient 内部失败已经重试 llm_retry 次，外层
+    JSON 解析失败又触发一整轮新的 LLMClient 调用（内部又是 llm_retry
+    次），最坏情况下实际请求次数被放大到 llm_retry² 次，且远超其余三处
+    调用方（Planner/ActionSelector/Verifier）的重试预算，与"统一重试
+    策略"的设计初衷相悖。合并成这一个回调、只让 call_with_retry() 跑
+    一轮，就和其余三处调用方完全一致了。
     """
-    messages: list[MessageParam] = [{"role": "user", "content": prompt}]
+    # 只有 TextBlock 才有 .text 属性，其余 block 类型（ThinkingBlock/ToolUseBlock 等）
+    # 需要先用 isinstance 收窄类型，避免静态检查器报“成员不存在”。
+    text_parts = [block.text for block in message.content if isinstance(block, TextBlock)]
+    raw_output = "".join(text_parts)
 
-    def _parse_extract_text(message: Message) -> str:
-        # 只有 TextBlock 才有 .text 属性，其余 block 类型（ThinkingBlock/ToolUseBlock 等）
-        # 需要先用 isinstance 收窄类型，避免静态检查器报“成员不存在”。
-        text_parts = [block.text for block in message.content if isinstance(block, TextBlock)]
-        return "".join(text_parts)
+    cleaned = raw_output.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
 
-    return await LLMClient(config).call_with_retry(
-        caller_name="browser_extract",
-        parse_response=_parse_extract_text,
-        model=config.model,
-        max_tokens=2048,
-        system=system if system else anthropic.NOT_GIVEN,
-        messages=messages,
-    )
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise LLMOutputRetry(f"LLM 输出无法解析为 JSON（输出长度={len(raw_output)}）: {exc}") from exc
 
 
 async def _format_links_info(page) -> str:
@@ -386,7 +386,10 @@ async def browser_extract(
 ) -> ToolResult:
     """根据当前页面抽取结构化 JSON。
 
-    只重试两类"客观可判定"的失败：LLM 调用本身失败、输出不是合法 JSON。
+    只重试两类"客观可判定"的失败：LLM 调用本身失败、输出不是合法 JSON——
+    这两类都统一交给 LLMClient.call_with_retry() 处理（前者是网络层异常，
+    后者由 _parse_extract_response 转换成 LLMOutputRetry），一次调用跑完
+    config.llm_retry 次预算，不再像此前那样在外层额外套一层重试循环。
     不再在这里对字段名做启发式校验——原实现从 instruction/task 里用正则
     抓取带引号的 token 当作"必须出现的字段名"，但 instruction 是
     Planner/ActionSelector 当场转述的自由文本，其中举例用的引号内容
@@ -416,69 +419,31 @@ async def browser_extract(
         links_info=await _format_links_info(page),
     )
 
-    max_attempts = max(1, config.llm_retry)
-    last_error_msg = "未知错误"
-
-    for attempt in range(max_attempts):
-        will_retry = attempt + 1 < max_attempts
-
-        try:
-            raw_output = await _call_llm_extract(base_prompt, config, system=EXTRACTOR_SYSTEM)
-        except LLMError as exc:
-            # _call_llm_extract 内部已经把网络层的重试耗尽了，这里再重试
-            # 意味着重新发起一整轮新的请求（而非在同一轮里继续），仍然有机会
-            # 恢复；耗尽后原样返回失败。
-            last_error_msg = exc.message
-            logger.warning(
-                "browser_extract LLM 调用失败（第 %d/%d 次尝试）: %s%s",
-                attempt + 1, max_attempts, exc.message,
-                "，即将重试" if will_retry else "，已达重试上限",
-            )
-            if will_retry:
-                await asyncio.sleep(2**attempt)
-                continue
-            return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
-        except Exception as exc:
-            last_error_msg = f"LLM 调用异常: {exc}"
-            logger.warning(
-                "browser_extract LLM 调用异常（第 %d/%d 次尝试）: %s%s",
-                attempt + 1, max_attempts, exc,
-                "，即将重试" if will_retry else "，已达重试上限",
-            )
-            if will_retry:
-                await asyncio.sleep(2**attempt)
-                continue
-            return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
-
-        cleaned = raw_output.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            cleaned = cleaned.split("\n", 1)[-1] if "\n" in cleaned else cleaned
-
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            last_error_msg = f"LLM 输出无法解析为 JSON: {exc}"
-            logger.warning(
-                "browser_extract JSON 解析失败（第 %d/%d 次尝试，输出长度=%d）: %s%s",
-                attempt + 1, max_attempts, len(raw_output), exc,
-                "，即将重试" if will_retry else "，已达重试上限",
-            )
-            if will_retry:
-                await asyncio.sleep(2**attempt)
-                continue
-            return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
-
-        result_payload = {"url": obs["url"], "data": parsed}
-        return ToolResult(
-            success=True,
-            page_changed=False,
-            output=json.dumps(result_payload, ensure_ascii=False),
-            error_msg=None,
+    try:
+        parsed = await LLMClient(config).call_with_retry(
+            caller_name="browser_extract",
+            parse_response=_parse_extract_response,
+            model=config.model,
+            max_tokens=2048,
+            system=EXTRACTOR_SYSTEM,
+            messages=[{"role": "user", "content": base_prompt}],
         )
+    except LLMError as exc:
+        return ToolResult(success=False, page_changed=False, output=None, error_msg=exc.message)
+    except Exception as exc:
+        # call_with_retry() 正常情况下失败耗尽会统一包装成 LLMError，这里兜底的是
+        # 边界情况：比如 parse_response（_parse_extract_response）内部抛出了
+        # LLMOutputRetry 之外的异常、或底层 SDK 抛出了不属于 anthropic.APIError
+        # 体系的异常，这类异常不会被 call_with_retry() 转换，会直接穿透到这里。
+        return ToolResult(success=False, page_changed=False, output=None, error_msg=f"LLM 调用异常: {exc}")
 
-    # 理论上不会走到这里（循环内每条路径都已 return），仅作类型层面的兜底。
-    return ToolResult(success=False, page_changed=False, output=None, error_msg=last_error_msg)
+    result_payload = {"url": obs["url"], "data": parsed}
+    return ToolResult(
+        success=True,
+        page_changed=False,
+        output=json.dumps(result_payload, ensure_ascii=False),
+        error_msg=None,
+    )
 
 
 async def browser_scroll(page, direction: Literal["up", "down"]) -> ToolResult:
