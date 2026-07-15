@@ -15,7 +15,6 @@ from typing import Awaitable, Callable, Literal
 
 import anthropic
 from anthropic.types import Message, MessageParam, TextBlock
-from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -50,10 +49,6 @@ _EXTRACT_LINKS_JS = """
         }));
 }
 """
-
-# 加载项目根目录下的 .env 文件（若存在），使 ANTHROPIC_API_KEY 等变量
-# 能在未手动 export 的情况下被 os.environ.get() 读取到。
-load_dotenv()
 
 # 敏感字段正则：匹配到即认为是密码/卡号/证件号等字段，禁止 browser_type 写入。
 SENSITIVE_PATTERNS = [
