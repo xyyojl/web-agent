@@ -18,6 +18,9 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 与 eval_core.py 同一套路径约定：把项目根目录加进 sys.path，使得无论从
 # 哪个工作目录执行 `python eval/run_ablation.py`，`import eval_core` /
