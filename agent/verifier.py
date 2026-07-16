@@ -86,7 +86,11 @@ def _build_schema_from_example(expected: dict | list) -> dict:
     """
     builder = SchemaBuilder()
     builder.add_object(expected)
-    return builder.to_schema()
+    schema = builder.to_schema()
+    # genson 自带一个无效的 $schema 值（http://json-schema.org/schema#），
+    # jsonschema 库不认识，会发 DeprecationWarning；强制覆盖为合法 Draft 2020-12 metaschema。
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    return schema
 
 
 def _enforce_min_items(schema: dict, sample: object) -> None:
