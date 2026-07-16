@@ -109,7 +109,39 @@ cp .env.example .env
 ANTHROPIC_API_KEY=your-anthropic-api-key-here
 ```
 
-### 3. 运行任务评测
+### 3. 运行单个任务（CLI）
+`main.py` 提供了一个开箱即用的 CLI 入口，单次运行一个 WebAgent 任务，无需接触 eval 体系：
+
+```bash
+uv run python main.py --task "找到页面上的版本号" --url "http://localhost:8080/text_find.html"
+```
+
+运行结束后会在终端打印结果面板（状态 / 步数 / 输出 / 失败原因 / Trace 目录），执行轨迹与截图会落在 `traces/run-<timestamp>/` 下，用法与 eval 体系共用同一套 `AgentConfig` / `TraceLogger`。
+
+常用参数：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--task`（必填） | 任务描述，用自然语言说明要 Agent 做什么 | — |
+| `--url`（必填） | 任务起始页面 URL | — |
+| `--vision` | 开启视觉模态（截图随观察结果一起喂给 LLM） | 不传则沿用 `AgentConfig`/环境变量配置 |
+| `--model` | 覆盖使用的模型名 | `AgentConfig.model`（`claude-sonnet-4-6`） |
+| `--max-steps` | 覆盖单任务最大步数 | `AgentConfig.max_steps`（15） |
+| `--max-fail` | 覆盖允许的连续失败次数 | `AgentConfig.max_fail`（3） |
+| `--trace-dir` | 覆盖 trace 输出根目录 | `traces/` |
+| `-v` / `--verbose` | 打印 DEBUG 级别日志 | 默认 INFO |
+
+> 💡 未显式传入的参数会退回 `AgentConfig.from_env()`，即优先读取 `.env` 里的 `WEBAGENT_*` 环境变量（完整列表见 `.env.example`），最后才是 dataclass 默认值——命令行参数 > 环境变量 > 默认值。
+
+更多示例：
+```bash
+uv run python main.py --task "..." --url "https://example.com" --vision
+uv run python main.py --task "..." --url "https://example.com" --max-steps 20 --model claude-sonnet-4-6
+```
+
+安全拦截（`SafetyError`）或 LLM 调用彻底失败（`LLMError`）时，CLI 会打印对应错误信息并以非零退出码结束，便于接入 CI 或 shell 脚本判断成败。
+
+### 4. 运行任务评测
 通过评测套件，您可以一键运行本地和公开任务评测，系统会自动统计成功率并在 `eval/` 目录生成 `eval_summary.md` 汇总报告：
 ```bash
 uv run python eval/run_eval.py --suite local     # 本地 11 条
@@ -125,20 +157,35 @@ uv run python eval/run_eval.py --suite all       # 全部
 >
 > `--suite public` 的目标页面是公网真实网站，不依赖此服务。
 
+### 5. 运行单元测试
+项目在 `tests/` 目录下提供了覆盖各分层纯逻辑与关键分支（配置解析、异常体系、Planner/Selector/Verifier/Executor 的字段校验与分发、重试骨架、Eval 指标计算等）的单元测试，全部基于 mock，不依赖真实浏览器或网络请求：
+```bash
+uv run pytest tests/ -q
+```
+
+需要覆盖率报告可额外加 `pytest-cov`：
+```bash
+uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
+```
+
+> 与 `eval/run_eval.py` 的关系：单元测试验证的是各组件的内部逻辑正确性（不启动浏览器、不调用真实 LLM）；`eval/run_eval.py` 是端到端集成评测（真实跑 Playwright + LLM），两者互补，不是替代关系。
+
 ---
 
 ## 📊 Eval 评估结果
 
-项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在 `eval/` 目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-14）：
+项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在 `eval/` 目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-16）：
 
-| 指标 | 本地任务 | 公开网页 | 目标值 |
+| 指标 | 本地任务 | 公开网页 | 目标值（MVP） |
 | :--- | :--- | :--- | :--- |
-| 任务成功率 (task_success_rate) | 11/11 | 5/5 | ≥ 70% |
-| 步骤成功率 (step_success_rate) | 100% | 100% | — |
-| 平均执行步数 (avg_steps) | 2.2 | 1.4 | — |
-| 自恢复率 (recovery_rate) | 0/0 | 0/0 | — |
-| 反安全动作拦截率 (unsafe_action_block_rate) | 1/1 | 0/0 | — |
-| 证据完整性 (evidence_completeness) | 11/11 | 5/5 | — |
+| 任务成功率 (task_success_rate) | 11/11 | 5/5 | 本地 ≥ 70%，公开 ≥ 60% |
+| 步骤成功率 (step_success_rate) | 96% | 100% | ≥ 80% |
+| 平均执行步数 (avg_steps) | 2.3 | 1.6 | ≤ 8 步 |
+| 自恢复率 (recovery_rate) | 0/0 | 0/0 | ≥ 30% |
+| 反安全动作拦截率 (unsafe_action_block_rate) | 1/1 | 0/0 | = 100% |
+| 证据完整性 (evidence_completeness) | 11/11 | 5/5 | = 100% |
+
+> 💡 `recovery_rate`、`unsafe_action_block_rate` 的分母只统计触发了对应场景的 case（分别对应"曾出现失败步骤"和"命中 `safety_block` 校验模式"）；本次两个 suite 里都没有出现失败步骤，公开网页 suite 也没有配置 `safety_block` case，因此显示为 `0/0`，不代表指标未达标。
 
 运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
 
@@ -153,3 +200,37 @@ uv run python eval/run_eval.py --suite all       # 全部
 *   **Environment**: Python 3.11+, uv, dotenv
 *   **Testing & Mocking**: pytest, pytest-asyncio
 *   **UI/CLI**: Rich (Terminal Formatting)
+
+---
+
+## 📁 项目结构
+
+```
+web-agent/
+├── main.py              # CLI 入口：单次运行一个任务
+├── agent/                # L0~L6 各分层实现
+│   ├── agent_controller.py   # L0 编排层
+│   ├── observer.py           # L1 感知层
+│   ├── planner.py            # L2 推理层
+│   ├── action_selector.py    # L3 决策层
+│   ├── executor.py            # L4 执行层（+ browser_tools.py）
+│   ├── tracer.py              # L5 记录层
+│   ├── verifier.py            # L6 评测层
+│   ├── config.py / types.py / exceptions.py / llm_client.py / vision.py / prompts.py
+├── eval/                 # Eval 体系：case 定义、评测运行器、消融实验
+│   ├── cases/                 # 本地 + 公开任务 case 定义（JSON）
+│   ├── pages/                 # 本地 case 对应的静态 HTML 页面
+│   ├── eval_core.py            # 指标计算与 case 加载
+│   ├── run_eval.py             # 评测运行器（生成 eval_summary.md）
+│   └── run_ablation.py         # DOM-only vs DOM+Vision 消融实验
+├── tests/                # 单元测试（pytest，mock 掉浏览器与 LLM）
+├── traces/               # 运行时生成：每次任务的 trace.jsonl / report.json / 截图
+├── .env.example           # 环境变量配置示例（含全部 WEBAGENT_* 可选项说明）
+└── pyproject.toml
+```
+
+---
+
+## 📄 License
+
+本项目基于 [MIT License](LICENSE) 开源。
