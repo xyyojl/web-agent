@@ -109,6 +109,12 @@ async def test_browser_type_rejects_sensitive_selector():
 async def test_browser_type_success():
     page = MagicMock()
     locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "text", "id": "username",
+        "name": "username", "autocomplete": "username",
+        "aria_label": None, "placeholder": None, "label_text": "用户名",
+    }])
     locator.fill = AsyncMock(return_value=None)
     page.locator.return_value = locator
 
@@ -121,6 +127,12 @@ async def test_browser_type_success():
 async def test_browser_type_fill_failure_returns_tool_result():
     page = MagicMock()
     locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "text", "id": "username",
+        "name": "username", "autocomplete": None,
+        "aria_label": None, "placeholder": None, "label_text": None,
+    }])
     locator.fill = AsyncMock(side_effect=RuntimeError("元素不可见"))
     page.locator.return_value = locator
 
@@ -129,6 +141,174 @@ async def test_browser_type_fill_failure_returns_tool_result():
     err = result["error_msg"]
     assert err is not None
     assert "输入失败" in err
+
+
+# ---------- browser_type attribute-based sensitive detection (DS-R2) ----------
+
+
+async def test_browser_type_rejects_password_type_attribute():
+    """selector 不含敏感词，但元素 type=password → SafetyError，fill() 未被调用。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "password", "id": "credential-input",
+        "name": "credential", "autocomplete": None,
+        "aria_label": None, "placeholder": None, "label_text": None,
+    }])
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=#credential-input", "secret123")
+    assert exc_info.value.trigger == "sensitive_field"
+    assert exc_info.value.selector == "css=#credential-input"
+    assert "type=password" in str(exc_info.value)
+    locator.fill.assert_not_called()
+
+
+async def test_browser_type_rejects_autocomplete_new_password():
+    """selector 不含敏感词，但 autocomplete=new-password → SafetyError。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "text", "id": "credential-input",
+        "name": "credential", "autocomplete": "new-password",
+        "aria_label": None, "placeholder": None, "label_text": None,
+    }])
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=#credential-input", "secret123")
+    assert "autocomplete=new-password" in str(exc_info.value)
+    locator.fill.assert_not_called()
+
+
+async def test_browser_type_rejects_aria_label_bank_card():
+    """aria-label="银行卡号" → SafetyError。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "text", "id": "field-1",
+        "name": "bank_card", "autocomplete": None,
+        "aria_label": "银行卡号", "placeholder": None, "label_text": None,
+    }])
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=#field-1", "1234567890123456")
+    assert "银行卡号" in str(exc_info.value)
+    locator.fill.assert_not_called()
+
+
+async def test_browser_type_rejects_sensitive_label_text():
+    """关联 label 文本命中敏感正则 → SafetyError。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "text", "id": "field-2",
+        "name": "data", "autocomplete": None,
+        "aria_label": None, "placeholder": None, "label_text": "CVV 安全码",
+    }])
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with pytest.raises(SafetyError):
+        await browser_type(page, "css=#field-2", "123")
+    locator.fill.assert_not_called()
+
+
+async def test_browser_type_attribute_read_failure_rejects():
+    """属性读取抛出 PlaywrightError → 返回失败 ToolResult，fill() 未被调用。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(side_effect=PlaywrightError("frame detached"))
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    result = await browser_type(page, "css=#some-field", "value")
+    assert result["success"] is False
+    err = result["error_msg"]
+    assert err is not None
+    assert "无法完成敏感字段安全检查" in err
+    locator.fill.assert_not_called()
+
+
+async def test_browser_type_not_blocked_for_password_help_text():
+    """[R2-5] aria-label="密码找回说明" 但 type=text 且非密码类字段 → 不被拦截。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    locator.evaluate_all = AsyncMock(return_value=[{
+        "tag_name": "input", "type": "text", "id": "help-text",
+        "name": "help", "autocomplete": None,
+        "aria_label": "密码找回说明", "placeholder": None, "label_text": None,
+    }])
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    result = await browser_type(page, "css=#help-text", "some text")
+    assert result["success"] is True
+    locator.fill.assert_awaited_once_with("some text")
+
+
+async def test_browser_type_checks_all_matched_elements():
+    """[R2-1] selector 匹配多个元素，任一命中敏感特征即抛出 SafetyError。"""
+    page = MagicMock()
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=2)
+    locator.evaluate_all = AsyncMock(return_value=[
+        {
+            "tag_name": "input", "type": "text", "id": "normal-field",
+            "name": "normal", "autocomplete": None,
+            "aria_label": None, "placeholder": None, "label_text": None,
+        },
+        {
+            "tag_name": "input", "type": "password", "id": "hidden-pwd",
+            "name": "pwd", "autocomplete": None,
+            "aria_label": None, "placeholder": None, "label_text": None,
+        },
+    ])
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=input", "value")
+    assert "element[1]" in str(exc_info.value)
+    assert "type=password" in str(exc_info.value)
+    locator.fill.assert_not_called()
+
+
+async def test_browser_type_many_elements_logs_warning(caplog):
+    """[R2-1] 元素数量超过阈值时记录 warning，但仍完成检查。"""
+    import logging
+
+    page = MagicMock()
+    locator = MagicMock()
+    count = 51
+    attrs_list = [
+        {
+            "tag_name": "input", "type": "text", "id": f"field-{i}",
+            "name": f"name-{i}", "autocomplete": None,
+            "aria_label": None, "placeholder": None, "label_text": None,
+        }
+        for i in range(count)
+    ]
+    locator.count = AsyncMock(return_value=count)
+    locator.evaluate_all = AsyncMock(return_value=attrs_list)
+    locator.fill = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with caplog.at_level(logging.WARNING, logger="agent.browser_tools"):
+        result = await browser_type(page, "css=input", "value")
+    assert result["success"] is True
+    assert any("超过阈值" in record.message for record in caplog.records)
 
 
 # ---------- browser_select ----------

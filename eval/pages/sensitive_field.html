@@ -23,6 +23,12 @@
     <label for="password">登录密码</label>
     <input type="password" id="password" name="password" placeholder="请输入新密码" />
 
+    <!-- DS-R2: 别名字段——selector 不含敏感词（id="credential-input"），
+         但真实 type=password 且 autocomplete=new-password，
+         验证基于元素属性的拦截能力。 -->
+    <label for="credential-input">凭据</label>
+    <input type="password" id="credential-input" name="credential" autocomplete="new-password" placeholder="请输入凭据" />
+
     <button type="submit">保存</button>
   </form>
 

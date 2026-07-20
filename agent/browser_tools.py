@@ -55,6 +55,10 @@ SENSITIVE_PATTERNS = [
     r"credit.?card", r"card.?number", r"cvv",
     r"id.?number", r"national.?id", r"ssn",
     r"bank.?account",
+    # 中文敏感字段（不含"密码"——密码类字段由 type=password / autocomplete 判定，
+    # 避免"密码找回说明"等合法帮助文本被误伤，[R2-5]）
+    r"银行卡", r"银行账号", r"银行账户",
+    r"信用卡", r"安全码", r"身份证",
 ]
 
 # 登录页信号：browser_open 打开新页面后检测，命中则暂停等待人工确认。
@@ -76,6 +80,130 @@ def _check_sensitive(selector: str) -> None:
             trigger="sensitive_field",
             selector=selector,
         )
+
+
+# autocomplete 值中明确标识密码类字段的取值
+_PASSWORD_AUTOCOMPLETE_VALUES = {"current-password", "new-password"}
+
+# 多元素匹配时记录 warning 的阈值 [R2-1]
+_MAX_ELEMENT_WARNING_THRESHOLD = 50
+
+# 读取元素安全相关属性的 JS 表达式（在页面上下文执行）
+_CHECK_SENSITIVE_ATTRS_JS = """
+(elements) => {
+    const results = [];
+    for (const el of elements) {
+        const attrs = {
+            tag_name: el.tagName.toLowerCase(),
+            type: el.getAttribute('type'),
+            id: el.getAttribute('id'),
+            name: el.getAttribute('name'),
+            autocomplete: el.getAttribute('autocomplete'),
+            aria_label: el.getAttribute('aria-label'),
+            placeholder: el.getAttribute('placeholder'),
+            label_text: null,
+        };
+
+        // 关联 label 判定——三种方式 [R2-2]
+        // 方式一：<label for=ID> 与目标 id 匹配
+        if (attrs.id) {
+            const label = document.querySelector('label[for="' + attrs.id + '"]');
+            if (label) {
+                attrs.label_text = (label.textContent || '').trim() || null;
+            }
+        }
+
+        // 方式二：目标元素被 <label> 标签包裹
+        if (!attrs.label_text) {
+            const parentLabel = el.closest('label');
+            if (parentLabel) {
+                attrs.label_text = (parentLabel.textContent || '').trim() || null;
+            }
+        }
+
+        // 方式三：aria-labelledby 指向的元素文本
+        if (!attrs.label_text) {
+            const labelledby = el.getAttribute('aria-labelledby');
+            if (labelledby) {
+                const labelEl = document.getElementById(labelledby);
+                if (labelEl) {
+                    attrs.label_text = (labelEl.textContent || '').trim() || null;
+                }
+            }
+        }
+
+        results.push(attrs);
+    }
+    return results;
+}
+"""
+
+
+def _find_sensitive_evidence(attrs: dict[str, str | None]) -> list[str]:
+    """检查单个元素的属性是否命中敏感特征，返回命中规则列表。"""
+    hits = []
+
+    # 1. type=password → 明确的密码输入框
+    type_val = (attrs.get("type") or "").lower()
+    if type_val == "password":
+        hits.append("type=password")
+
+    # 2. autocomplete 包含 current-password / new-password
+    autocomplete_val = (attrs.get("autocomplete") or "").lower()
+    if autocomplete_val in _PASSWORD_AUTOCOMPLETE_VALUES:
+        hits.append(f"autocomplete={autocomplete_val}")
+
+    # 3. 其他属性命中敏感正则
+    for attr_name in ("id", "name", "aria_label", "placeholder", "label_text"):
+        val = attrs.get(attr_name)
+        if val and _SENSITIVE_RE.search(val):
+            hits.append(f"{attr_name}={val!r}")
+
+    return hits
+
+
+async def _check_sensitive_attributes(page, selector: str) -> list[dict]:
+    """读取目标元素的安全相关属性，返回命中敏感证据的元素列表。
+
+    遍历所有匹配元素 [R2-1]，任意一个命中敏感特征即包含在返回列表中。
+    属性读取失败时抛出 PlaywrightError，由调用方决定如何处理。
+
+    不得写入页面、不得执行 fill()、不得吞掉 SafetyError。
+    """
+    locator = page.locator(selector)
+
+    count = await locator.count()
+
+    if count == 0:
+        # 无匹配元素：不是安全问题，让 fill() 自然失败即可
+        return []
+
+    if count > _MAX_ELEMENT_WARNING_THRESHOLD:
+        logger.warning(
+            "selector=%s 匹配到 %d 个元素，超过阈值 %d，仍继续检查",
+            selector, count, _MAX_ELEMENT_WARNING_THRESHOLD,
+        )
+
+    attrs_list = await locator.evaluate_all(_CHECK_SENSITIVE_ATTRS_JS)
+
+    # count > 0 但 evaluate_all 返回空列表：元素可能位于 iframe 或
+    # shadow DOM 内无法读取属性，按"属性读取失败"处理 [R2-3]
+    if not attrs_list:
+        raise PlaywrightError(
+            f"selector={selector} 匹配到 {count} 个元素但无法读取属性"
+            "（可能位于 iframe 或 shadow DOM 内）"
+        )
+
+    evidence = []
+    for i, attrs in enumerate(attrs_list):
+        hits = _find_sensitive_evidence(attrs)
+        if hits:
+            evidence.append({
+                "element_index": i,
+                "hits": hits,
+            })
+
+    return evidence
 
 
 async def _detect_login_page(page) -> str | None:
@@ -306,8 +434,40 @@ async def browser_select(page, selector: str, value: str) -> ToolResult:
 
 
 async def browser_type(page, selector: str, text: str) -> ToolResult:
-    """向指定 selector 填入文本；命中敏感字段直接抛出 SafetyError（不吞掉）。"""
-    _check_sensitive(selector)  # 命中则在此处直接抛出，穿透工具边界
+    """向指定 selector 填入文本；命中敏感字段直接抛出 SafetyError（不吞掉）。
+
+    安全检查分两道：
+    1. _check_sensitive(selector) —— selector 文本正则快速拒绝；
+    2. _check_sensitive_attributes(page, selector) —— 读取元素真实属性，
+       覆盖 selector 不含敏感词但元素实际是密码/银行卡等敏感字段的场景（DS-R2）。
+    """
+    _check_sensitive(selector)  # 第一道：selector 正则快速拒绝
+
+    # 第二道：元素真实属性检查
+    try:
+        evidence = await _check_sensitive_attributes(page, selector)
+    except PlaywrightError as exc:
+        # 属性读取失败：不得默认放行，返回失败 ToolResult [R2-3]
+        logger.warning("敏感字段安全检查失败，拒绝写入: selector=%s, error=%s", selector, exc)
+        return ToolResult(
+            success=False,
+            page_changed=False,
+            output=None,
+            error_msg=f"无法完成敏感字段安全检查: {exc}",
+        )
+
+    if evidence:
+        # 命中敏感属性：抛出 SafetyError，不调用 fill()
+        evidence_str = "; ".join(
+            f"element[{e['element_index']}]: {', '.join(e['hits'])}"
+            for e in evidence
+        )
+        raise SafetyError(
+            "检测到敏感字段，拒绝写入",
+            trigger="sensitive_field",
+            selector=selector,
+            evidence=evidence_str,
+        )
 
     try:
         await page.locator(selector).fill(text)
