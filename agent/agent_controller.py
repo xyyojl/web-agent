@@ -206,7 +206,21 @@ class AgentController:
         extract_cache: dict[str, object] | None = None
 
         try:
-            open_result = await self.executor.open(url)
+            try:
+                open_result = await self.executor.open(url)
+            except SafetyError as exc:
+                # 打开阶段的安全拦截（如登录页人工中止）：不能让 SafetyError
+                # 穿透到最外层 finally——否则 _finalize() 不会被执行，
+                # report.json 不会生成。这里捕获后走和主循环内安全拦截一致
+                # 的收尾路径：构造失败 AgentResult 并落盘 report。
+                logger.warning("任务在打开页面阶段命中安全拦截，终止: %s", exc)
+                return self._finalize(
+                    task=task,
+                    success=False,
+                    output=None,
+                    steps=0,
+                    fail_reason=f"safety_violation: {exc.message}",
+                )
             if not open_result["success"]:
                 return self._finalize(
                     task=task,

@@ -1,9 +1,10 @@
-"""agent/agent_controller.py 单元测试：只覆盖模块级纯函数（动作签名、
-结果摘要、去重判定、history 拼装等），不实例化 AgentController 本体
-（其依赖真实 Playwright + LLM 调用，属于集成测试范畴）。
+"""agent/agent_controller.py 单元测试：覆盖模块级纯函数（动作签名、
+结果摘要、去重判定、history 拼装等）以及 run() 中打开阶段 SafetyError
+处理路径（DS-Y2）。
 """
 
 import json
+from unittest.mock import AsyncMock
 
 from agent.agent_controller import (
     _MAX_HISTORY_STEPS,
@@ -15,6 +16,8 @@ from agent.agent_controller import (
     _summarize_result,
     _unwrap_extract_data,
 )
+from agent.config import AgentConfig
+from agent.exceptions import SafetyError
 from agent.types import LLMAction, ObserveResult, ToolResult
 
 # _append_history 是 AgentController 的静态方法，不是模块级函数
@@ -243,3 +246,84 @@ def test_append_history_maintains_role_alternation():
     for i, role in enumerate(roles):
         expected = "user" if i % 2 == 0 else "assistant"
         assert role == expected
+
+
+# ---------- DS-Y2: login page abort generates report ----------
+
+
+def _make_controller(tmp_path) -> AgentController:
+    """构造一个真实的 AgentController（构造函数安全，不启动浏览器/不调用 LLM），
+    用于测试 run() 中打开阶段的 SafetyError 处理。
+    """
+    config = AgentConfig(trace_dir=str(tmp_path))
+    return AgentController(config)
+
+
+async def test_run_login_page_abort_returns_safety_violation_result(tmp_path):
+    """正向验证：executor.open 抛 SafetyError → 返回失败 result，steps=0，
+    fail_reason 以 safety_violation: 开头，report.json 已生成。
+    """
+    controller = _make_controller(tmp_path)
+    controller.executor.open = AsyncMock(
+        side_effect=SafetyError("用户在登录页确认环节选择中止", trigger="login_page")
+    )
+    controller.executor.close = AsyncMock(return_value=None)
+
+    result = await controller.run("测试任务", "http://localhost:8080/login.html", "L11")
+
+    assert result["success"] is False
+    assert result["steps"] == 0
+    fail_reason = result["fail_reason"]
+    assert fail_reason is not None
+    assert fail_reason.startswith("safety_violation:")
+    assert "用户在登录页确认环节选择中止" in fail_reason
+
+    # report.json 必须存在且内容与 result 一致
+    import os
+    report_path = os.path.join(controller.tracer.run_dir, "report.json")
+    assert os.path.exists(report_path)
+    with open(report_path, encoding="utf-8") as f:
+        report = json.load(f)
+    assert report["success"] is False
+    assert report["steps"] == 0
+    assert report["fail_reason"] == result["fail_reason"]
+    assert report["task_id"] == "L11"
+
+
+async def test_run_open_failure_not_misclassified_as_safety_violation(tmp_path):
+    """负向验证：executor.open 返回普通失败 ToolResult → fail_reason 以 open_failed: 开头，
+    不得误记为 safety_violation。
+    """
+    controller = _make_controller(tmp_path)
+    controller.executor.open = AsyncMock(
+        return_value=ToolResult(
+            success=False,
+            page_changed=False,
+            output=None,
+            error_msg="timeout",
+        )
+    )
+    controller.executor.close = AsyncMock(return_value=None)
+
+    result = await controller.run("测试任务", "http://localhost:8080/x.html")
+
+    assert result["success"] is False
+    assert result["steps"] == 0
+    fail_reason = result["fail_reason"]
+    assert fail_reason is not None
+    assert fail_reason.startswith("open_failed:")
+    assert "timeout" in fail_reason
+    assert not fail_reason.startswith("safety_violation:")
+
+
+async def test_run_login_page_abort_closes_executor(tmp_path):
+    """回归检查：SafetyError 捕获后 finally 仍执行 executor.close()。"""
+    controller = _make_controller(tmp_path)
+    controller.executor.open = AsyncMock(
+        side_effect=SafetyError("用户中止", trigger="login_page")
+    )
+    controller.executor.close = AsyncMock(return_value=None)
+
+    await controller.run("测试任务", "http://localhost:8080/login.html")
+
+    controller.executor.close.assert_awaited_once()
