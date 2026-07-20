@@ -65,7 +65,7 @@ L6 评测层
 *   **L2 推理层 · WebPlanner**：分析任务目标与当前页面状态，输出自然语言行动计划（`plan: str`），说明意图但不指定 selector。
 *   **L3 决策层 · ActionSelector**：基于 Planner 的计划做 Tool Calling，输出严格格式的结构化动作 `LLMAction`（action/selector/text/value/reason）。与 L2 拆为两次独立 LLM 调用，职责分离（推理需宽松格式、决策需严格 JSON，合并会互相干扰）。
 *   **L4 执行层 · PlaywrightExecutor + BrowserTools**：将 LLMAction 翻译为 Playwright 底层浏览器操作，三级 selector 降级（CSS → get_by_text → get_by_role），返回 `ToolResult`。
-*   **L5 记录层 · TraceLogger**：每步强制写入 `trace.jsonl`（含 Step / URL / Reason / Action / ToolResult）+ 截图 `step-N.png`，失败步骤尤其详尽，确保执行轨迹 100% 可复现可审计。
+*   **L5 记录层 · TraceLogger**：每步强制写入 `trace.jsonl`（含 Step / URL / observation 证据 / Action / tool_output / Reason / ToolResult）+ 截图 `step-N.png`，失败步骤尤其详尽，确保执行轨迹 100% 可复现可审计。trace_schema_version=2。
 *   **L6 评测层 · Verifier**：独立于主循环，对任务结果做评测。支持 exact / contains / json_schema / llm_judge / safety_block 五种模式按 case 指定，输出 `VerifyResult` 并汇总为 `eval_summary.md`。
 
 ### 2. 关键设计决策
@@ -192,6 +192,34 @@ uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
 运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
 
 > 💡 **消融实验**：在本地 10 项任务上对照 DOM-only vs DOM+Vision 两组，任务成功率打平（10/10），平均步数减少 20%（2.5 → 2.0，以 DOM-only 为基准），差异出现在两类任务上——需要确认页面状态变化的（标签页导航、表单填写）和纯文本/结构化抽取的（文本查找、表格抽取），说明视觉信号主要提升的是多模态 Agent 的**执行效率**而非**准确率**。完整报告含逐 case 步数对比与分析：[ablation_report.md](eval/ablation_report.md)
+
+### Trace 格式说明（trace_schema_version=2）
+
+每步以一行 JSON 追加写入 `trace.jsonl`，包含以下字段：
+
+| 字段 | 说明 |
+|---|---|
+| `trace_schema_version` | Trace schema 版本号（当前为 `2`），供下游代码区分新旧格式 |
+| `run_id` / `step` / `timestamp` | 运行标识、步数、UTC 时间戳 |
+| `url` / `screenshot` | 当前页面 URL 与截图路径（截图为观察前快照） |
+| `plan` / `action` / `selector` / `selector_level` | Planner 计划、执行动作、定位策略 |
+| `reason` | 动作选择理由 |
+| `success` / `page_changed` / `error_msg` | 执行结果 |
+| `duration_ms` | 本步耗时 |
+| `observation.title` | 页面标题 |
+| `observation.text_hash` | 可见文本 hash |
+| `observation.visible_text_summary` | 可见文本摘要 |
+| `observation.interactive_elements` | 交互元素列表（role/name/selector/href） |
+| `tool_output` | ToolResult.output（单条最大 10,000 字符，超出时截断） |
+| `tool_output_truncated` | `true` 表示 tool_output 已被截断 |
+| `tool_output_sha256` | 截断时记录完整内容的 SHA-256 摘要 |
+
+**安全约束**：
+- `browser_type()` 的输入文本值（如密码）**不会**写入 trace。
+- `.env`、认证 token、cookie、Authorization header 不会写入 trace。
+- 截图始终是**观察前**快照，不是动作后截图。
+
+> ⚠️ **第三方数据风险提示**：`tool_output` 和 `observation` 字段可能包含被抓取页面本身携带的第三方数据（如页面上展示的他人信息）。这类内容不属于用户输入，不在当前脱敏范围内。trace 中的 `url` 字段记录了数据来源页面。归档 trace 或 artifact 前，需人工检查是否包含敏感第三方内容。
 
 ---
 

@@ -3,6 +3,7 @@
 """
 
 import json
+import hashlib
 
 from agent.tracer import TraceLogger
 from agent.types import AgentResult, LLMAction, ObserveResult, ToolResult
@@ -118,6 +119,130 @@ def test_record_appends_jsonl_line(tmp_path):
     assert rows[0]["success"] is True
     assert rows[0]["run_id"] == tracer.run_id
     assert "duration_ms" in rows[0]
+    # DS-Y3: new fields
+    assert rows[0]["trace_schema_version"] == 2
+    assert rows[0]["tool_output"] is None
+    assert rows[0]["tool_output_truncated"] is False
+    assert rows[0]["tool_output_sha256"] is None
+
+
+def test_record_includes_observation_fields(tmp_path):
+    """DS-Y3: trace records must include observation evidence for review."""
+    tracer = _make_tracer(tmp_path)
+    obs: ObserveResult = {
+        "url": "https://example.com/page",
+        "title": "Example Page",
+        "visible_text_summary": "Hello World\nClick below",
+        "text_hash": "abc123def",
+        "interactive_elements": [
+            {"role": "button", "name": "Submit", "selector": "css=#submit", "href": None},
+            {"role": "link", "name": "Home", "selector": "text=Home", "href": "/home"},
+        ],
+        "screenshot_path": "/tmp/step-001.png",
+    }
+    action: LLMAction = {"action": "click", "selector": "css=#submit", "text": None, "value": None, "reason": "test"}
+    result: ToolResult = {"success": True, "page_changed": False, "error_msg": None, "output": None}
+
+    tracer.record(0, obs, "test plan", action, result)
+
+    with open(tracer.trace_path, encoding="utf-8") as f:
+        row = json.loads(f.readline())
+
+    assert row["observation"]["title"] == "Example Page"
+    assert row["observation"]["text_hash"] == "abc123def"
+    assert row["observation"]["visible_text_summary"] == "Hello World\nClick below"
+    assert len(row["observation"]["interactive_elements"]) == 2
+    assert row["observation"]["interactive_elements"][0]["name"] == "Submit"
+
+
+def test_record_includes_tool_output(tmp_path):
+    """DS-Y3: tool_output must be recorded for extract/done actions."""
+    tracer = _make_tracer(tmp_path)
+    obs: ObserveResult = {
+        "url": "https://x", "title": "T", "visible_text_summary": "",
+        "text_hash": "h", "interactive_elements": [], "screenshot_path": "/tmp/s.png",
+    }
+    action: LLMAction = {"action": "extract", "selector": None, "text": None, "value": None, "reason": "extract data"}
+    output_json = json.dumps({"name": "Alice", "score": 90})
+    result: ToolResult = {"success": True, "page_changed": False, "error_msg": None, "output": output_json}
+
+    tracer.record(0, obs, "extract", action, result)
+
+    with open(tracer.trace_path, encoding="utf-8") as f:
+        row = json.loads(f.readline())
+
+    assert row["tool_output"] == output_json
+    assert row["tool_output_truncated"] is False
+    assert row["tool_output_sha256"] is None
+
+
+def test_record_tool_output_truncated_with_hash(tmp_path):
+    """DS-Y3: tool_output exceeding 10,000 chars must be truncated with sha256 hash."""
+    tracer = _make_tracer(tmp_path)
+    obs: ObserveResult = {
+        "url": "https://x", "title": "T", "visible_text_summary": "",
+        "text_hash": "h", "interactive_elements": [], "screenshot_path": "/tmp/s.png",
+    }
+    action: LLMAction = {"action": "extract", "selector": None, "text": None, "value": None, "reason": "extract"}
+    long_output = "x" * 10_001
+    result: ToolResult = {"success": True, "page_changed": False, "error_msg": None, "output": long_output}
+
+    tracer.record(0, obs, "extract", action, result)
+
+    with open(tracer.trace_path, encoding="utf-8") as f:
+        row = json.loads(f.readline())
+
+    assert row["tool_output_truncated"] is True
+    assert len(row["tool_output"]) == 10_000
+    expected_hash = hashlib.sha256(long_output.encode("utf-8")).hexdigest()
+    assert row["tool_output_sha256"] == expected_hash
+
+
+def test_record_tool_output_none_no_hash(tmp_path):
+    """DS-Y3: tool_output=None should not generate hash or mark as truncated."""
+    tracer = _make_tracer(tmp_path)
+    obs: ObserveResult = {
+        "url": "https://x", "title": "T", "visible_text_summary": "",
+        "text_hash": "h", "interactive_elements": [], "screenshot_path": "/tmp/s.png",
+    }
+    action: LLMAction = {"action": "click", "selector": "css=#btn", "text": None, "value": None, "reason": "click"}
+    result: ToolResult = {"success": True, "page_changed": False, "error_msg": None, "output": None}
+
+    tracer.record(0, obs, "click", action, result)
+
+    with open(tracer.trace_path, encoding="utf-8") as f:
+        row = json.loads(f.readline())
+
+    assert row["tool_output"] is None
+    assert row["tool_output_truncated"] is False
+    assert row["tool_output_sha256"] is None
+
+
+def test_record_type_action_text_not_in_trace(tmp_path):
+    """DS-Y3 Implementation Contract: browser_type() input text must NOT appear in trace."""
+    tracer = _make_tracer(tmp_path)
+    obs: ObserveResult = {
+        "url": "https://x", "title": "T", "visible_text_summary": "",
+        "text_hash": "h", "interactive_elements": [], "screenshot_path": "/tmp/s.png",
+    }
+    secret_value = "super-secret-password-123"
+    action: LLMAction = {
+        "action": "type", "selector": "css=#input", "text": secret_value,
+        "value": None, "reason": "filling input",
+    }
+    result: ToolResult = {"success": True, "page_changed": False, "error_msg": None, "output": None}
+
+    tracer.record(0, obs, "type into input", action, result)
+
+    with open(tracer.trace_path, encoding="utf-8") as f:
+        raw_line = f.read()
+
+    # The secret value must not appear anywhere in the trace JSONL
+    assert secret_value not in raw_line
+    # Verify the action type IS recorded (just not the text value)
+    row = json.loads(raw_line.strip())
+    assert row["action"] == "type"
+    assert "text" not in row  # no top-level text field
 
 
 def test_write_report_contains_expected_fields(tmp_path):

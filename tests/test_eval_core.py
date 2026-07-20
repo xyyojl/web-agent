@@ -38,12 +38,16 @@ def _case(**overrides) -> EvalCase:
 
 def _agent_result(**overrides) -> AgentResult:
     base: AgentResult = {
+        "task_id": "T01",
         "task": "抓取标题",
+        "url": "https://example.com",
         "success": True,
         "output": "hello",
         "steps": 2,
+        "duration_s": 1.0,
         "fail_reason": None,
         "trace_dir": "/tmp/run-x",
+        "last_screenshot": None,
     }
     base.update(overrides)
     return base
@@ -201,8 +205,26 @@ def test_has_complete_evidence_true_when_all_files_present(tmp_path):
     (trace_dir / "report.json").write_text("{}", encoding="utf-8")
     (trace_dir / "step-001.png").write_bytes(b"fake")
 
-    outcome = _outcome(agent_result=_agent_result(trace_dir=str(trace_dir)))
+    outcome = _outcome(
+        agent_result=_agent_result(trace_dir=str(trace_dir)),
+        steps_records=[{"trace_schema_version": 2, "success": True}],
+    )
     assert _has_complete_evidence(outcome) is True
+
+
+def test_has_complete_evidence_false_when_old_trace_format(tmp_path):
+    """DS-Y3 [Y3-2]: old format traces (no trace_schema_version) are incomplete evidence."""
+    trace_dir = tmp_path / "run-old"
+    trace_dir.mkdir()
+    (trace_dir / "trace.jsonl").write_text("{}", encoding="utf-8")
+    (trace_dir / "report.json").write_text("{}", encoding="utf-8")
+    (trace_dir / "step-001.png").write_bytes(b"fake")
+
+    outcome = _outcome(
+        agent_result=_agent_result(trace_dir=str(trace_dir)),
+        steps_records=[{"success": True}],  # no trace_schema_version
+    )
+    assert _has_complete_evidence(outcome) is False
 
 
 def test_has_complete_evidence_false_when_missing_screenshot(tmp_path):

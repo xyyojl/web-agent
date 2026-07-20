@@ -162,7 +162,13 @@ def _format_percent(numerator: int, denominator: int) -> str:
 
 
 def _has_complete_evidence(outcome: CaseOutcome) -> bool:
-    """trace.jsonl + report.json + 至少一张截图 都存在，才算这个 case 的证据链完整。"""
+    """trace.jsonl + report.json + 至少一张截图 + trace_schema_version >= 2 都满足，才算证据链完整。
+
+    DS-Y3 [Y3-2]: 旧格式 trace（无 trace_schema_version 或版本 < 2）缺少 observation
+    和 tool_output 字段，无法完整复盘页面状态和执行输出，因此不计为完整证据。
+    这不会导致 runner 崩溃——旧 trace 仍可正常读取，只是 evidence_completeness
+    指标会反映其不完整。
+    """
     if outcome.agent_result is None:
         return False
     trace_dir = outcome.agent_result["trace_dir"]
@@ -171,7 +177,12 @@ def _has_complete_evidence(outcome: CaseOutcome) -> bool:
     has_trace = os.path.isfile(os.path.join(trace_dir, "trace.jsonl"))
     has_report = os.path.isfile(os.path.join(trace_dir, "report.json"))
     has_screenshot = any(f.endswith(".png") for f in os.listdir(trace_dir))
-    return has_trace and has_report and has_screenshot
+    if not (has_trace and has_report and has_screenshot):
+        return False
+    # [Y3-2] 检查 trace 记录是否包含 trace_schema_version >= 2
+    if not outcome.step_records:
+        return False
+    return any(r.get("trace_schema_version", 0) >= 2 for r in outcome.step_records)
 
 
 def _steps_of(outcome: CaseOutcome) -> int:

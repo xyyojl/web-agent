@@ -5,6 +5,7 @@
 不使用 json.dump 直接写文件句柄，避免并发写入时出现半行截断。
 """
 
+import hashlib
 import json
 import os
 import time
@@ -12,6 +13,14 @@ import uuid
 from datetime import datetime, timezone
 
 from agent.types import AgentResult, LLMAction, ObserveResult, ToolResult
+
+# [Y3-2] Trace JSONL schema 版本号。v2 新增 observation 嵌套字段、
+# tool_output / tool_output_truncated / tool_output_sha256。
+# 下游读取代码（evidence_completeness）用此字段区分新旧格式。
+_TRACE_SCHEMA_VERSION = 2
+
+# tool_output 单条最大字符数，超过时截断并记录完整内容的 sha256 摘要。
+_TOOL_OUTPUT_MAX_CHARS = 10_000
 
 
 class TraceLogger:
@@ -113,12 +122,27 @@ class TraceLogger:
         action: LLMAction,
         result: ToolResult,
     ) -> None:
-        """追加写入一行 trace 记录。"""
+        """追加写入一行 trace 记录。
+
+        DS-Y3: 记录完整的观察证据和执行证据，确保 trace 可复盘：
+        - observation 嵌套字段：title / text_hash / visible_text_summary / interactive_elements
+        - tool_output：ToolResult.output（截断至 10,000 字符，超出时记录 sha256）
+        - trace_schema_version：供下游区分新旧格式
+
+        安全约束（Implementation Contract）：
+        - 不记录 browser_type() 的输入文本值（action["text"] 不写入 trace）
+        - 不记录 .env、认证 token、cookie、Authorization header
+        """
         now = time.monotonic()
         duration_ms = int((now - self._last_time) * 1000)
         self._last_time = now
 
+        tool_output, tool_output_truncated, tool_output_sha256 = (
+            self._process_tool_output(result.get("output"))
+        )
+
         entry = {
+            # --- 现有顶层字段（保留，向后兼容） ---
             "run_id": self.run_id,
             "step": step,
             "timestamp": self._now_iso(),
@@ -133,6 +157,17 @@ class TraceLogger:
             "reason": action.get("reason"),
             "screenshot": obs.get("screenshot_path"),
             "duration_ms": duration_ms,
+            # --- DS-Y3 新增字段 ---
+            "trace_schema_version": _TRACE_SCHEMA_VERSION,
+            "observation": {
+                "title": obs.get("title"),
+                "text_hash": obs.get("text_hash"),
+                "visible_text_summary": obs.get("visible_text_summary"),
+                "interactive_elements": obs.get("interactive_elements"),
+            },
+            "tool_output": tool_output,
+            "tool_output_truncated": tool_output_truncated,
+            "tool_output_sha256": tool_output_sha256,
         }
 
         # 先在内存中拼好完整一行字符串，再一次性写入并 flush，
@@ -142,6 +177,33 @@ class TraceLogger:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+
+    @staticmethod
+    def _process_tool_output(
+        output: str | dict | list | None,
+    ) -> tuple[str | None, bool, str | None]:
+        """处理 ToolResult.output，返回 (tool_output, truncated, sha256) 三元组。
+
+        - output=None → (None, False, None)，不生成 hash，不视为错误
+        - output 短于上限 → (output_str, False, None)
+        - output 超过 10,000 字符 → (截断内容, True, 完整内容的 sha256)
+
+        dict / list 先 json.dumps 序列化为字符串再判断长度。
+        """
+        if output is None:
+            return None, False, None
+
+        if isinstance(output, (dict, list)):
+            output_str = json.dumps(output, ensure_ascii=False)
+        else:
+            output_str = str(output)
+
+        if len(output_str) <= _TOOL_OUTPUT_MAX_CHARS:
+            return output_str, False, None
+
+        full_hash = hashlib.sha256(output_str.encode("utf-8")).hexdigest()
+        truncated = output_str[:_TOOL_OUTPUT_MAX_CHARS]
+        return truncated, True, full_hash
 
     def write_report(self, task: str, result: AgentResult) -> None:
         """写入本次 run 的汇总报告 report.json。
