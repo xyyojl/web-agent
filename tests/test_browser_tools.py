@@ -4,7 +4,7 @@
   登录页检测）用轻量 Mock/Fake Page 对象模拟，不启动真实浏览器。
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import pytest
 from anthropic.types import Message, TextBlock, Usage
@@ -397,6 +397,8 @@ async def test_browser_scroll_failure_returns_tool_result():
 async def test_browser_click_css_success():
     page = MagicMock()
     page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="Overview")
+    page.wait_for_timeout = AsyncMock(return_value=None)
     locator = MagicMock()
     locator.click = AsyncMock(return_value=None)
     page.locator.return_value = locator
@@ -411,6 +413,8 @@ async def test_browser_click_css_success():
 async def test_browser_click_falls_back_from_css_to_text():
     page = MagicMock()
     page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="Overview")
+    page.wait_for_timeout = AsyncMock(return_value=None)
 
     css_locator = MagicMock()
     css_locator.click = AsyncMock(side_effect=PlaywrightError("找不到元素"))
@@ -430,6 +434,8 @@ async def test_browser_click_falls_back_from_css_to_text():
 async def test_browser_click_falls_back_to_role_when_css_and_text_fail():
     page = MagicMock()
     page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="Overview")
+    page.wait_for_timeout = AsyncMock(return_value=None)
 
     css_locator = MagicMock()
     css_locator.click = AsyncMock(side_effect=PlaywrightError("css 未命中"))
@@ -453,6 +459,8 @@ async def test_browser_click_falls_back_to_role_when_css_and_text_fail():
 async def test_browser_click_all_levels_fail_returns_failure():
     page = MagicMock()
     page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="Overview")
+    page.wait_for_timeout = AsyncMock(return_value=None)
 
     css_locator = MagicMock()
     css_locator.click = AsyncMock(side_effect=PlaywrightError("css 未命中"))
@@ -487,6 +495,8 @@ async def test_browser_click_extracts_fallback_text_from_text_equals_selector():
     """selector='text=提交' 且未显式传 text 时，应拆出 '提交' 灌进 text/role 降级链。"""
     page = MagicMock()
     page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="Overview")
+    page.wait_for_timeout = AsyncMock(return_value=None)
 
     css_locator = MagicMock()
     css_locator.click = AsyncMock(side_effect=PlaywrightError("css 未命中"))
@@ -499,6 +509,107 @@ async def test_browser_click_extracts_fallback_text_from_text_equals_selector():
     result = await browser_click(page, selector="text=提交")
     assert result["success"] is True
     page.get_by_text.assert_called_with("提交")
+
+
+# ---------- browser_click page_changed semantics (DS-Y1) ----------
+
+
+async def test_browser_click_page_changed_true_when_url_unchanged_but_text_changed():
+    """正向验证：URL 不变、innerText 从 Overview 变成 Features → page_changed=True。"""
+    page = MagicMock()
+    page.url = "https://x"
+    page.evaluate = AsyncMock(side_effect=["Overview", "Features"])
+    page.wait_for_timeout = AsyncMock(return_value=None)
+
+    locator = MagicMock()
+    locator.click = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    result = await browser_click(page, selector="css=#tab-features")
+    assert result["success"] is True
+    assert result["page_changed"] is True
+    # URL 未变化时应调用 wait_for_timeout 而非 wait_for_load_state
+    page.wait_for_timeout.assert_awaited_once()
+    page.wait_for_load_state.assert_not_called()
+
+
+async def test_browser_click_page_changed_true_when_url_changed():
+    """正向验证：URL 变化时 page_changed=True，且仍调用 wait_for_load_state。"""
+    page = MagicMock()
+    # page.url 被访问 4 次：url_before, _compute_fingerprint(before), url_changed判断, _compute_fingerprint(after)
+    type(page).url = PropertyMock(side_effect=["https://x", "https://x", "https://y", "https://y"])
+    page.evaluate = AsyncMock(side_effect=["text_before", "text_after"])
+    page.wait_for_timeout = AsyncMock(return_value=None)
+    page.wait_for_load_state = AsyncMock(return_value=None)
+
+    locator = MagicMock()
+    locator.click = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    result = await browser_click(page, selector="css=#link")
+    assert result["success"] is True
+    assert result["page_changed"] is True
+    page.wait_for_load_state.assert_awaited_once_with("networkidle", timeout=5000)
+    page.wait_for_timeout.assert_not_called()
+
+
+async def test_browser_click_page_changed_false_when_url_and_text_unchanged():
+    """回归检查：URL 不变且文本不变 → page_changed=False。"""
+    page = MagicMock()
+    page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="same text")
+    page.wait_for_timeout = AsyncMock(return_value=None)
+
+    locator = MagicMock()
+    locator.click = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    result = await browser_click(page, selector="css=#btn")
+    assert result["success"] is True
+    assert result["page_changed"] is False
+
+
+async def test_browser_click_fingerprint_failure_falls_back_to_url_changed(caplog):
+    """指纹读取失败时回退为 url_changed，click 仍返回成功，记录 warning。"""
+    import logging
+
+    page = MagicMock()
+    page.url = "https://x"
+    page.evaluate = AsyncMock(side_effect=PlaywrightError("frame detached"))
+    page.wait_for_timeout = AsyncMock(return_value=None)
+
+    locator = MagicMock()
+    locator.click = AsyncMock(return_value=None)
+    page.locator.return_value = locator
+
+    with caplog.at_level(logging.WARNING, logger="agent.browser_tools"):
+        result = await browser_click(page, selector="css=#btn")
+    assert result["success"] is True
+    # URL 未变化且指纹读取失败 → 回退 url_changed=False
+    assert result["page_changed"] is False
+    assert any("状态指纹读取失败" in r.message for r in caplog.records)
+
+
+async def test_browser_click_selector_level_output_unchanged():
+    """回归检查：三层 selector 降级及 selector_level 输出不改变。"""
+    page = MagicMock()
+    page.url = "https://x"
+    page.evaluate = AsyncMock(return_value="text")
+    page.wait_for_timeout = AsyncMock(return_value=None)
+
+    css_locator = MagicMock()
+    css_locator.click = AsyncMock(side_effect=PlaywrightError("css 未命中"))
+    page.locator.return_value = css_locator
+
+    text_locator = MagicMock()
+    text_locator.click = AsyncMock(return_value=None)
+    page.get_by_text.return_value = text_locator
+
+    result = await browser_click(page, selector="css=#missing", text="提交")
+    assert result["success"] is True
+    out = result["output"]
+    assert out is not None
+    assert '"selector_level": "text"' in out
 
 
 # ---------- _parse_extract_response ----------

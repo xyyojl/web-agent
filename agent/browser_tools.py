@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -297,6 +298,44 @@ async def browser_observe(page, observer: BrowserStateObserver) -> ObserveResult
         raise BrowserError("页面观察失败", action="observe") from exc
 
 
+# [Y1-1] 噪声内容排除列表：计算状态指纹前，从 document.body.innerText 中
+# 剔除这些 selector 对应的 DOM 区域（如时间戳、轮播图、广告位、埋点计数器）。
+# 默认为空（保守策略，不排除任何内容），避免引入假阳性。
+NOISE_SELECTORS: list[str] = []
+
+# [Y1-2] URL 未变化时，读取 after-fingerprint 前的短暂等待（毫秒），
+# 避免 SPA 异步渲染尚未完成就读取指纹导致假阴性。等待超时不算错误。
+_ASYNC_RENDER_WAIT_MS = 200
+
+# 读取 document.body.innerText 并剔除 noise selectors 区域的 JS 表达式
+_GET_INNER_TEXT_JS = """
+(noiseSelectors) => {
+    const body = document.body.cloneNode(true);
+    for (const selector of noiseSelectors) {
+        try {
+            body.querySelectorAll(selector).forEach(el => el.remove());
+        } catch(e) {}
+    }
+    return (body.innerText || '').trim();
+}
+"""
+
+
+async def _compute_fingerprint(page) -> tuple[str, str] | None:
+    """读取当前页面状态指纹 (url, sha256_of_innerText)。
+
+    [Y1-1] noise_selectors 中的选择器对应区域会从 innerText 中剔除后再计算 hash。
+    读取失败时返回 None，调用方按回退逻辑处理。
+    """
+    try:
+        url = page.url
+        inner_text = await page.evaluate(_GET_INNER_TEXT_JS, NOISE_SELECTORS)
+        text_hash = hashlib.sha256(inner_text.encode("utf-8")).hexdigest()
+        return url, text_hash
+    except PlaywrightError:
+        return None
+
+
 async def _try_click_css(page, selector: str, timeout: int) -> None:
     await page.locator(selector).click(timeout=timeout)
 
@@ -361,12 +400,16 @@ async def browser_click(
             error_msg="browser_click 需要至少提供 selector 或 text 之一",
         )
 
+    # 点击前读取状态指纹（仅在确认有点击尝试时才读取，避免无 selector/text
+    # 时的快速失败路径也触发 page.evaluate）
+    before_fp = await _compute_fingerprint(page)
+
     last_error: Exception | None = None
     for level, attempt in attempts:
         try:
             resolved_role = await attempt()
-            page_changed = page.url != url_before
-            if page_changed:
+            url_changed = page.url != url_before
+            if url_changed:
                 # 点击触发了跳转：等待新页面网络空闲，降低"跳转后元素消失/
                 # 半成品 DOM"导致后续 observe/click 误判的概率。networkidle
                 # 超时不视为点击失败——点击动作本身已经成功，这里只是尽力
@@ -378,6 +421,27 @@ async def browser_click(
                         "browser_click 后等待 networkidle 超时（跳转已发生），降级继续: %s",
                         wait_exc,
                     )
+            else:
+                # [Y1-2] URL 未变化时，短暂等待 SPA 异步渲染完成，
+                # 避免读取指纹过早导致假阴性。等待超时不算错误。
+                try:
+                    await page.wait_for_timeout(_ASYNC_RENDER_WAIT_MS)
+                except PlaywrightError:
+                    pass
+
+            after_fp = await _compute_fingerprint(page)
+
+            if before_fp is not None and after_fp is not None:
+                page_changed = before_fp != after_fp
+            else:
+                # [Y1] 指纹读取失败：回退为 url_changed，click 仍返回成功
+                page_changed = url_changed
+                logger.warning(
+                    "browser_click 状态指纹读取失败，回退为 URL 变化判断: "
+                    "before_fp_ok=%s, after_fp_ok=%s, url_changed=%s",
+                    before_fp is not None, after_fp is not None, url_changed,
+                )
+
             output = json.dumps(
                 {
                     "selector_level": level,
