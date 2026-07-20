@@ -4,7 +4,7 @@
   "task_type": "页面导航",
   "task": "在 Python 官方文档导航到 asyncio 模块页面，返回该页面的 H1 标题文字。最终答案必须只含标题本身，禁止添加任何解释文字、前后缀或引号包装",
   "url": "https://docs.python.org/3/library/asyncio.html",
-  "expected_output": "asyncio",
-  "verify_mode": "contains",
+  "expected_output": "asyncio — Asynchronous I/O",
+  "verify_mode": "exact",
   "difficulty": "low"
 }

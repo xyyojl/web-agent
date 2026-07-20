@@ -5,6 +5,6 @@
   "task": "找到 LangChain README 中 Quickstart 部分的第一个代码块（安装命令），原样返回该命令。最终答案必须只含命令本身，禁止添加任何解释文字、前后缀或引号包装",
   "url": "https://github.com/langchain-ai/langchain",
   "expected_output": "uv add langchain",
-  "verify_mode": "contains",
+  "verify_mode": "exact",
   "difficulty": "low"
 }

@@ -5,6 +5,6 @@
   "task": "找到 playwright PyPI 页面上的 pip 安装命令，原样返回该命令。最终答案必须只含命令本身，禁止添加任何解释文字、前后缀或引号包装",
   "url": "https://pypi.org/project/playwright/",
   "expected_output": "pip install playwright",
-  "verify_mode": "contains",
+  "verify_mode": "exact",
   "difficulty": "low"
 }

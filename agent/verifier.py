@@ -9,6 +9,7 @@ verify() 本身不会抛出未捕获异常。
 import json
 import logging
 import re
+from typing import Any
 
 import jsonschema
 from anthropic.types import Message, MessageParam, TextBlock
@@ -125,6 +126,109 @@ def _describe_validation_error(exc: jsonschema.ValidationError) -> str:
     return f"{path}: {exc.message}"
 
 
+def _deep_compare(
+    expected: Any,
+    actual: Any,
+    path: str = "$",
+) -> str | None:
+    """对 expected 与 actual 执行确定性深度比较。
+
+    Schema 校验只保证"形状对"（字段名存在、类型匹配），但不保证"值对"。
+    本函数在 Schema 通过后做第二轮校验，确保 actual 与 expected 在语义上
+    完全等价：
+    - dict：键集合必须相同（不允许额外字段、不允许缺失字段），每个键递归比较；
+    - list：长度必须相同，按索引递归比较；
+    - 标量：
+      · bool 严格区分于 int/float（True != 1）；
+      · int/float 按数值相等判定（90 == 90.0）；
+      · str 比较前统一 strip 首尾空白（与 exact 模式一致）；
+      · 字符串与数字之间不做隐式转换。
+
+    返回 None 表示相等；返回字符串表示第一个不匹配位置的描述，
+    包含 JSON path（如 $[0].name、$.version、$: array length expected 3, actual 1）。
+    """
+    # None
+    if expected is None and actual is None:
+        return None
+    if expected is None or actual is None:
+        return (
+            f"{path}: type mismatch, expected "
+            f"{type(expected).__name__}, actual {type(actual).__name__}"
+        )
+
+    # bool 严格区分于 int/float（Python 里 bool 是 int 子类，必须先判断）
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        if not isinstance(expected, bool) or not isinstance(actual, bool):
+            return (
+                f"{path}: type mismatch, expected "
+                f"{type(expected).__name__}, actual {type(actual).__name__}"
+            )
+        if expected != actual:
+            return f"{path}: value mismatch, expected {expected}, actual {actual}"
+        return None
+
+    # int/float：按数值相等判定（90 == 90.0）
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        if expected != actual:
+            return f"{path}: value mismatch, expected {expected}, actual {actual}"
+        return None
+
+    # str：strip 后比较
+    if isinstance(expected, str):
+        if not isinstance(actual, str):
+            return (
+                f"{path}: type mismatch, expected str, "
+                f"actual {type(actual).__name__}"
+            )
+        if expected.strip() != actual.strip():
+            return f"{path}: value mismatch, expected {expected}, actual {actual}"
+        return None
+
+    # dict：键集合必须相同，递归比较
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return (
+                f"{path}: type mismatch, expected dict, "
+                f"actual {type(actual).__name__}"
+            )
+        expected_keys = set(expected.keys())
+        actual_keys = set(actual.keys())
+        if expected_keys != actual_keys:
+            missing = sorted(expected_keys - actual_keys)
+            extra = sorted(actual_keys - expected_keys)
+            if missing:
+                return f"{path}: missing key(s): {missing}"
+            return f"{path}: unexpected key(s): {extra}"
+        for key in sorted(expected.keys()):
+            result = _deep_compare(expected[key], actual[key], f"{path}.{key}")
+            if result is not None:
+                return result
+        return None
+
+    # list：长度必须相同，按索引递归比较
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return (
+                f"{path}: type mismatch, expected list, "
+                f"actual {type(actual).__name__}"
+            )
+        if len(expected) != len(actual):
+            return (
+                f"{path}: array length expected "
+                f"{len(expected)}, actual {len(actual)}"
+            )
+        for i, (exp_item, act_item) in enumerate(zip(expected, actual)):
+            result = _deep_compare(exp_item, act_item, f"{path}[{i}]")
+            if result is not None:
+                return result
+        return None
+
+    # 兜底
+    if expected != actual:
+        return f"{path}: value mismatch, expected {expected}, actual {actual}"
+    return None
+
+
 class Verifier:
     """验证层：支持 exact / contains / json_schema / llm_judge 四种模式。"""
 
@@ -136,25 +240,41 @@ class Verifier:
         """按 case['verify_mode'] 分发到对应的校验方法。"""
         mode = case["verify_mode"]
         if mode == "exact":
-            return self._verify_exact(case, result)
-        if mode == "contains":
-            return self._verify_contains(case, result)
-        if mode == "json_schema":
-            return self._verify_json_schema(case, result)
-        if mode == "llm_judge":
-            return await self._verify_llm_judge(case, result)
-        if mode == "safety_block":
-            return self._verify_safety_block(case, result)
+            vr = self._verify_exact(case, result)
+        elif mode == "contains":
+            vr = self._verify_contains(case, result)
+        elif mode == "json_schema":
+            vr = self._verify_json_schema(case, result)
+        elif mode == "llm_judge":
+            vr = await self._verify_llm_judge(case, result)
+        elif mode == "safety_block":
+            vr = self._verify_safety_block(case, result)
+        else:
+            # Literal 类型只在静态检查阶段约束取值；运行时 case 数据来自 JSON
+            # 文件，仍可能出现非法 verify_mode，这里兜底而不是让 KeyError/
+            # AttributeError 直接抛出。
+            vr = VerifyResult(
+                case_id=case["id"],
+                success=False,
+                reason=f"未知的 verify_mode: {mode!r}",
+                confidence=1.0,
+            )
 
-        # Literal 类型只在静态检查阶段约束取值；运行时 case 数据来自 JSON
-        # 文件，仍可能出现非法 verify_mode，这里兜底而不是让 KeyError/
-        # AttributeError 直接抛出。
-        return VerifyResult(
-            case_id=case["id"],
-            success=False,
-            reason=f"未知的 verify_mode: {mode!r}",
-            confidence=1.0,
-        )
+        # [R1-4] 公开网页数据可能随版本更新而漂移：对 public case 的
+        # json_schema/exact 失败结果追加 possible_live_drift=true 提示，
+        # 帮助复核者区分"agent 出错"与"页面基准已过期"（不影响 pass/fail）。
+        if (
+            not vr["success"]
+            and case.get("type") == "public"
+            and mode in ("json_schema", "exact")
+        ):
+            vr = VerifyResult(
+                case_id=vr["case_id"],
+                success=vr["success"],
+                reason=f"{vr['reason']} (possible_live_drift=true)",
+                confidence=vr["confidence"],
+            )
+        return vr
 
     @staticmethod
     def _verify_exact(case: EvalCase, result: AgentResult) -> VerifyResult:
@@ -215,10 +335,21 @@ class Verifier:
                 confidence=1.0,
             )
 
+        # Phase 2：Schema 只保证"形状对"（字段名存在、类型匹配），但不保证"值对"。
+        # 再执行确定性深度比较，确保 actual 与 expected 在语义上完全等价。
+        diff = _deep_compare(expected, actual)
+        if diff is not None:
+            return VerifyResult(
+                case_id=case["id"],
+                success=False,
+                reason=diff,
+                confidence=1.0,
+            )
+
         return VerifyResult(
             case_id=case["id"],
             success=True,
-            reason="字段名与类型均匹配",
+            reason="字段名、类型与值均匹配",
             confidence=1.0,
         )
 
