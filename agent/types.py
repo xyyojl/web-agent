@@ -34,12 +34,16 @@ class ToolResult(TypedDict):
 
 
 class AgentResult(TypedDict):
-    task:        str
-    success:     bool
-    output:      str | dict | None
-    steps:       int
-    fail_reason: str | None
-    trace_dir:   str
+    task_id:         str | None
+    task:            str
+    url:             str
+    success:         bool
+    output:          str | dict | None
+    steps:           int
+    duration_s:      float
+    fail_reason:     str | None
+    trace_dir:       str
+    last_screenshot: str | None
 
 
 class EvalCase(TypedDict):

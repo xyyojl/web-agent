@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 
 from agent.action_selector import ActionSelector
 from agent.config import AgentConfig
@@ -161,13 +162,33 @@ class AgentController:
         # extract 动作）都落在同一个 traces/run-xxx/ 目录、编号连续。
         self.executor = PlaywrightExecutor(config, tracer=self.tracer)
 
-    async def run(self, task: str, url: str) -> AgentResult:
+        # 由 run() 在每次任务开始时写入，_finalize() 读取用来补全
+        # AgentResult / report.json 里的 task_id / url / duration_s。
+        # 这里先给出安全的兜底默认值，避免 _finalize 在 run() 尚未执行
+        # （理论上不应发生）时因属性不存在而抛 AttributeError。
+        self._task_id: str | None = None
+        self._url: str = ""
+        self._run_start_time: float = time.monotonic()
+
+    async def run(self, task: str, url: str, task_id: str | None = None) -> AgentResult:
         """执行一次完整任务，返回 AgentResult。
+
+        task_id：可选的任务标识（如 eval case 的 "L03"），供批量评测场景
+        在 report.json 里区分是哪一条 case 产生的记录；main.py 单次 CLI
+        运行不提供 case 概念，可以不传，report.json 里对应字段落为 null。
 
         executor.close() 放在最外层 try/finally 里：无论是正常终止、
         三种预期的失败终止，还是 Planner/Selector/Executor 抛出未预期的
         异常，都能保证浏览器资源被释放，不因异常路径而残留 Chromium 进程。
         """
+        self._task_id = task_id
+        self._url = url
+        # duration_s 从任务真正开始（含 open() 耗时）算到 _finalize() 落盘
+        # 那一刻为止，覆盖整个任务生命周期，口径与 trace.jsonl 里逐步的
+        # duration_ms（从 reset_step_timer() 之后才开始计）刻意不同——
+        # 后者是"主循环单步耗时"，前者是"这条 report 对应的总耗时"。
+        self._run_start_time = time.monotonic()
+
         history: list[dict] = []
         fail_count = 0
         # 记录最近的动作签名，用于检测"连续重复同一个动作、页面毫无进展"的死循环。
@@ -488,14 +509,24 @@ class AgentController:
         steps: int,
         fail_reason: str | None,
     ) -> AgentResult:
-        """构造 AgentResult 并落盘 report.json，避免在 run() 里重复这 3 行样板代码。"""
+        """构造 AgentResult 并落盘 report.json，避免在 run() 里重复这几行样板代码。
+
+        task_id / url 直接取 run() 开始时记下的 self._task_id / self._url；
+        duration_s 用 self._run_start_time 到此刻的耗时（秒，保留 2 位小数）；
+        last_screenshot 取 tracer 目前为止分配出去的最后一张截图路径——三者
+        都不需要调用方（run() 里 7 处 _finalize 调用点）逐个传参。
+        """
         result = AgentResult(
+            task_id=self._task_id,
             task=task,
+            url=self._url,
             success=success,
             output=output,
             steps=steps,
+            duration_s=round(time.monotonic() - self._run_start_time, 2),
             fail_reason=fail_reason,
             trace_dir=self.tracer.run_dir,
+            last_screenshot=self.tracer.last_screenshot_path,
         )
         self.tracer.write_report(task, result)
         return result

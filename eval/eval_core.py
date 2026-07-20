@@ -139,7 +139,7 @@ async def run_one_case(case: EvalCase, config: AgentConfig) -> CaseOutcome:
         # 用局部变量承接返回值：controller.run() 的返回类型是不带 Optional 的
         # AgentResult，局部变量的类型窄化比 outcome.agent_result 这种实例
         # 属性更可靠，后面几行都基于这个局部变量，不再重复读取实例属性。
-        agent_result = await controller.run(case["task"], case["url"])
+        agent_result = await controller.run(case["task"], case["url"], task_id=case.get("id"))
         outcome.agent_result = agent_result
         outcome.step_records = _load_step_records(agent_result["trace_dir"])
 

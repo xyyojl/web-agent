@@ -26,6 +26,13 @@ class TraceLogger:
         self.report_path = os.path.join(self.run_dir, "report.json")
 
         self._screenshot_step = 0
+        # 记录最近一次分配出去的截图路径，供 write_report() 写入
+        # report.json 的 last_screenshot 字段——next_screenshot_path()
+        # 是全局唯一的截图路径分配入口（主循环 observe() 每步一次、
+        # 以及 browser_screenshot 工具的显式 screenshot 动作都经它分配），
+        # 因此这里天然就是"整个 run 里最后一张截图"的路径，不需要
+        # AgentController 再额外传参数进来同步维护一份。
+        self._last_screenshot_path: str | None = None
         # 用于计算每步 duration_ms：以上一次 record() 结束时刻为基准。
         # 这里在构造时先设一个兜底值——如果调用方在 open() 成功后没有调用
         # reset_step_timer()，第一步的 duration_ms 会从这一刻（TraceLogger
@@ -48,7 +55,14 @@ class TraceLogger:
         """分配下一张截图路径，步数从 001 开始自动递增。"""
         self._screenshot_step += 1
         filename = f"step-{self._screenshot_step:03d}.png"
-        return os.path.join(self.run_dir, filename)
+        path = os.path.join(self.run_dir, filename)
+        self._last_screenshot_path = path
+        return path
+
+    @property
+    def last_screenshot_path(self) -> str | None:
+        """整个 run 目前为止分配出去的最后一张截图路径；一张都还没有时为 None。"""
+        return self._last_screenshot_path
 
     @staticmethod
     def _parse_selector_level(selector: str | None) -> str | None:
@@ -129,15 +143,26 @@ class TraceLogger:
             os.fsync(f.fileno())
 
     def write_report(self, task: str, result: AgentResult) -> None:
-        """写入本次 run 的汇总报告 report.json。"""
+        """写入本次 run 的汇总报告 report.json。
+
+        字段顺序 / 取值均对齐设计文档中的 report.json schema：
+        run_id / task_id / task / url / success / output / steps /
+        duration_s / fail_reason / trace_file / last_screenshot。
+        task_id、url、duration_s、last_screenshot 由 AgentController._finalize()
+        在构造 AgentResult 时一并写入，这里只负责原样落盘，不重新计算。
+        """
         report = {
             "run_id": self.run_id,
+            "task_id": result.get("task_id"),
             "task": task,
+            "url": result.get("url"),
             "success": result.get("success"),
-            "steps": result.get("steps"),
-            "fail_reason": result.get("fail_reason"),
             "output": result.get("output"),
+            "steps": result.get("steps"),
+            "duration_s": result.get("duration_s"),
+            "fail_reason": result.get("fail_reason"),
             "trace_file": self.trace_path,
+            "last_screenshot": result.get("last_screenshot"),
         }
         with open(self.report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)

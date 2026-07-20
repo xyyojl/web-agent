@@ -116,7 +116,7 @@ ANTHROPIC_API_KEY=your-anthropic-api-key-here
 uv run python main.py --task "找到页面上的版本号" --url "http://localhost:8080/text_find.html"
 ```
 
-运行结束后会在终端打印结果面板（状态 / 步数 / 输出 / 失败原因 / Trace 目录），执行轨迹与截图会落在 `traces/run-<timestamp>/` 下，用法与 eval 体系共用同一套 `AgentConfig` / `TraceLogger`。
+运行结束后会在终端打印结果面板（任务 ID / 状态 / 步数 / 耗时 / 输出 / 失败原因 / Trace 目录 / 最后截图），执行轨迹与截图会落在 `traces/run-<timestamp>/` 下，用法与 eval 体系共用同一套 `AgentConfig` / `TraceLogger`。
 
 常用参数：
 
@@ -124,6 +124,7 @@ uv run python main.py --task "找到页面上的版本号" --url "http://localho
 |---|---|---|
 | `--task`（必填） | 任务描述，用自然语言说明要 Agent 做什么 | — |
 | `--url`（必填） | 任务起始页面 URL | — |
+| `--task-id` | 可选的任务标识，写入 `report.json` 的 `task_id` 字段（如批量脚本里按 `"L03"` 这类 case id 关联单次 CLI 运行） | 不传则为 `null` |
 | `--vision` | 开启视觉模态（截图随观察结果一起喂给 LLM） | 不传则沿用 `AgentConfig`/环境变量配置 |
 | `--model` | 覆盖使用的模型名 | `AgentConfig.model`（`claude-sonnet-4-6`） |
 | `--max-steps` | 覆盖单任务最大步数 | `AgentConfig.max_steps`（15） |
@@ -137,6 +138,7 @@ uv run python main.py --task "找到页面上的版本号" --url "http://localho
 ```bash
 uv run python main.py --task "..." --url "https://example.com" --vision
 uv run python main.py --task "..." --url "https://example.com" --max-steps 20 --model claude-sonnet-4-6
+uv run python main.py --task "..." --url "https://example.com" --task-id "L03"
 ```
 
 安全拦截（`SafetyError`）或 LLM 调用彻底失败（`LLMError`）时，CLI 会打印对应错误信息并以非零退出码结束，便于接入 CI 或 shell 脚本判断成败。

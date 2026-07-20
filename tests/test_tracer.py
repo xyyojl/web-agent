@@ -94,21 +94,70 @@ def test_record_appends_jsonl_line(tmp_path):
 
 def test_write_report_contains_expected_fields(tmp_path):
     tracer = _make_tracer(tmp_path)
+    # 分配一张截图，模拟主循环 observe() 至少跑过一步，验证
+    # last_screenshot 会原样透传进 report.json。
+    screenshot_path = tracer.next_screenshot_path()
     result: AgentResult = {
+        "task_id": "L03",
         "task": "测试任务",
+        "url": "http://localhost:8080/tab_nav.html",
         "success": True,
         "steps": 3,
+        "duration_s": 12.3,
         "fail_reason": None,
         "output": "done",
         "trace_dir": tracer.run_dir,
+        "last_screenshot": screenshot_path,
     }
     tracer.write_report("测试任务", result)
 
     with open(tracer.report_path, encoding="utf-8") as f:
         report = json.load(f)
 
-    assert report["task"] == "测试任务"
-    assert report["success"] is True
-    assert report["steps"] == 3
-    assert report["output"] == "done"
     assert report["run_id"] == tracer.run_id
+    assert report["task_id"] == "L03"
+    assert report["task"] == "测试任务"
+    assert report["url"] == "http://localhost:8080/tab_nav.html"
+    assert report["success"] is True
+    assert report["output"] == "done"
+    assert report["steps"] == 3
+    assert report["duration_s"] == 12.3
+    assert report["fail_reason"] is None
+    assert report["trace_file"] == tracer.trace_path
+    assert report["last_screenshot"] == screenshot_path
+
+
+def test_write_report_task_id_and_last_screenshot_default_to_none(tmp_path):
+    """task_id 未传（如 main.py CLI 单次运行场景）、且从未分配过截图时，
+    两个字段应落为 null，而不是抛异常或被静默省略。
+    """
+    tracer = _make_tracer(tmp_path)
+    result: AgentResult = {
+        "task_id": None,
+        "task": "测试任务",
+        "url": "https://example.com",
+        "success": False,
+        "steps": 0,
+        "duration_s": 0.5,
+        "fail_reason": "open_failed: timeout",
+        "output": None,
+        "trace_dir": tracer.run_dir,
+        "last_screenshot": None,
+    }
+    tracer.write_report("测试任务", result)
+
+    with open(tracer.report_path, encoding="utf-8") as f:
+        report = json.load(f)
+
+    assert report["task_id"] is None
+    assert report["last_screenshot"] is None
+
+
+def test_last_screenshot_path_updates_as_screenshots_allocated(tmp_path):
+    tracer = _make_tracer(tmp_path)
+    assert tracer.last_screenshot_path is None
+    p1 = tracer.next_screenshot_path()
+    assert tracer.last_screenshot_path == p1
+    p2 = tracer.next_screenshot_path()
+    assert tracer.last_screenshot_path == p2
+    assert p1 != p2

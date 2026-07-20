@@ -42,6 +42,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task", required=True, help="任务描述，用自然语言说明要 Agent 做什么")
     parser.add_argument("--url", required=True, help="任务起始页面 URL")
     parser.add_argument(
+        "--task-id",
+        default=None,
+        help="可选的任务标识，写入 report.json 的 task_id 字段（如 'L03'）。不传则为 null",
+    )
+    parser.add_argument(
         "--vision",
         action="store_true",
         default=None,
@@ -82,11 +87,11 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     return config
 
 
-async def run_task(task: str, url: str, config: AgentConfig) -> int:
+async def run_task(task: str, url: str, config: AgentConfig, task_id: str | None = None) -> int:
     """跑一次任务并打印结果 + trace 路径。返回进程退出码（0 成功 / 1 失败）。"""
     controller = AgentController(config)
     try:
-        result = await controller.run(task, url)
+        result = await controller.run(task, url, task_id=task_id)
     except SafetyError as exc:
         _print(f"[安全拦截] {exc}", style="bold red")
         return 1
@@ -97,12 +102,15 @@ async def run_task(task: str, url: str, config: AgentConfig) -> int:
     status = "✅ 成功" if result["success"] else "❌ 失败"
     style = "bold green" if result["success"] else "bold red"
     body = (
+        f"任务 ID: {result['task_id'] or '-'}\n"
         f"任务: {result['task']}\n"
         f"状态: {status}\n"
         f"步数: {result['steps']}\n"
+        f"耗时: {result['duration_s']}s\n"
         f"输出: {result['output']}\n"
         f"失败原因: {result['fail_reason'] or '-'}\n"
-        f"Trace 目录: {result['trace_dir']}"
+        f"Trace 目录: {result['trace_dir']}\n"
+        f"最后截图: {result['last_screenshot'] or '-'}"
     )
     if _console is not None:
         _console.print(Panel(body, title="WebAgent 运行结果", style=style))
@@ -119,7 +127,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     config = build_config(args)
-    exit_code = asyncio.run(run_task(args.task, args.url, config))
+    exit_code = asyncio.run(run_task(args.task, args.url, config, task_id=args.task_id))
     sys.exit(exit_code)
 
 
