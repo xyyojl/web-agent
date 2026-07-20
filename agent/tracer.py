@@ -8,6 +8,7 @@
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 
 from agent.types import AgentResult, LLMAction, ObserveResult, ToolResult
@@ -18,7 +19,7 @@ class TraceLogger:
 
     def __init__(self, base_dir: str = "traces") -> None:
         self.base_dir = base_dir
-        self.run_id = f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        self.run_id = f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         self.run_dir = os.path.join(base_dir, self.run_id)
         os.makedirs(self.run_dir, exist_ok=True)
 

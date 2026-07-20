@@ -17,6 +17,34 @@ def test_run_dir_created_on_init(tmp_path):
     assert tmp_path.joinpath(tracer.run_id).is_dir()
 
 
+def test_run_id_unique_across_consecutive_instances(tmp_path):
+    """同一进程内连续创建 1,000 个 TraceLogger 时，run_id 和 run_dir 必须全部唯一。
+
+    uuid.uuid4().hex[:8] 提供 32 bit 随机性，碰撞概率可忽略，
+    足以覆盖同进程或跨进程的实际并发规模（[W1-1] 已评估并接受）。
+    """
+    run_ids = set()
+    run_dirs = set()
+    for _ in range(1000):
+        tracer = TraceLogger(base_dir=str(tmp_path))
+        run_ids.add(tracer.run_id)
+        run_dirs.add(tracer.run_dir)
+    assert len(run_ids) == 1000
+    assert len(run_dirs) == 1000
+
+
+def test_run_id_format_includes_timestamp_and_suffix(tmp_path):
+    """run_id 仍以 run- 开头，包含时间戳和 8 位十六进制后缀。"""
+    tracer = _make_tracer(tmp_path)
+    assert tracer.run_id.startswith("run-")
+    # 格式: run-YYYYMMDD-HHMMSS-a1b2c3d4
+    parts = tracer.run_id.split("-")
+    assert len(parts) == 4
+    assert len(parts[3]) == 8
+    int(parts[1])  # YYYYMMDD 可 parse 为整数
+    int(parts[2])  # HHMMSS 可 parse 为整数
+
+
 def test_next_screenshot_path_increments(tmp_path):
     tracer = _make_tracer(tmp_path)
     p1 = tracer.next_screenshot_path()
