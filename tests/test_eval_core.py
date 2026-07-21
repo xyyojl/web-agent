@@ -4,20 +4,28 @@ case 加载的容错行为，以及 CaseOutcome 的派生属性。
 """
 
 import json
+import os
 
 import pytest
 
 from agent.types import AgentResult, EvalCase, VerifyResult
+from agent.config import AgentConfig
 from eval.eval_core import (
+    ArtifactError,
     CaseOutcome,
     _avg_steps_value,
+    _build_case_record,
     _has_complete_evidence,
     _recovery_counts,
     _step_success_counts,
     _task_success_counts,
+    build_provenance,
+    build_results_json,
     compute_metrics,
     compute_raw_metrics,
     load_cases,
+    render_artifact_summary,
+    write_artifact,
 )
 
 
@@ -296,3 +304,220 @@ def test_compute_raw_metrics_none_when_no_cases():
     assert raw["task_success_rate"] is None
     assert raw["avg_steps"] is None
     assert raw["step_success_rate"] is None
+
+
+# ---------- DS-R3: Artifact 序列化 ----------
+
+
+def test_build_case_record_contains_all_required_fields():
+    """DS-R3: results.json per case must have case_id/suite/succeeded/agent_result/
+    verify_result/crash_reason/last_screenshot/trace_dir."""
+    outcome = _outcome(agent_result=_agent_result())
+    record = _build_case_record(outcome, "local")
+    assert record["case_id"] == "L01"
+    assert record["suite"] == "local"
+    assert record["succeeded"] is True
+    assert record["agent_result"] is not None
+    assert record["verify_result"] is not None
+    assert record["crash_reason"] is None
+    assert "last_screenshot" in record
+    assert record["trace_dir"] is not None
+
+
+def test_build_case_record_crash_case_not_pass():
+    """DS-R3 负向: crashed case must have succeeded=False, crash_reason set, agent_result=None."""
+    outcome = _outcome(crash="KeyError: url")
+    record = _build_case_record(outcome, "local")
+    assert record["succeeded"] is False
+    assert record["crash_reason"] == "KeyError: url"
+    assert record["agent_result"] is None
+    assert record["verify_result"] is None
+
+
+def test_build_results_json_case_count_matches_outcomes():
+    """DS-R3: results.json case count must match outcomes count."""
+    all_outcomes = {
+        "local": [_outcome(agent_result=_agent_result()), _outcome(agent_result=_agent_result())],
+        "public": [_outcome(agent_result=_agent_result())],
+    }
+    results = build_results_json(all_outcomes)
+    assert len(results["cases"]) == 3
+    assert results["cases"][0]["suite"] == "local"
+    assert results["cases"][2]["suite"] == "public"
+
+
+def test_build_provenance_contains_all_required_fields():
+    """DS-R3: provenance.json must have all required fields including git_dirty [R3-2]."""
+    config = AgentConfig()
+    provenance = build_provenance(
+        config=config,
+        suite_arg="all",
+        case_arg=None,
+        case_ids=["L01", "L02"],
+        git_commit="abc123",
+        git_dirty=True,
+    )
+    required = {
+        "generated_at", "suite_argument", "case_argument", "case_ids",
+        "model", "vision", "max_steps", "max_fail", "git_commit",
+        "git_dirty", "artifact_format_version",
+    }
+    assert required.issubset(provenance.keys())
+    assert provenance["git_dirty"] is True
+    assert provenance["artifact_format_version"] == 1
+
+
+def test_render_artifact_summary_includes_baselines_section():
+    """DS-R3 [R3-3]: summary.md must include 基准有效性 section."""
+    config = AgentConfig()
+    provenance = build_provenance(config, "all", None, ["L01"], "abc", False)
+    outcome = _outcome(agent_result=_agent_result())
+    suite_metrics = {"local": compute_metrics([outcome])}
+    all_outcomes = {"local": [outcome]}
+    summary = render_artifact_summary(suite_metrics, all_outcomes, provenance)
+    assert "基准有效性" in summary
+    assert "generated_at" in summary
+    assert "网站变化后本 artifact 不再代表当前行为" in summary
+
+
+def test_render_artifact_summary_git_dirty_warning():
+    """DS-R3 [R3-2]: summary.md must show git_dirty warning when dirty."""
+    config = AgentConfig()
+    provenance = build_provenance(config, "all", None, ["L01"], "abc", True)
+    outcome = _outcome(agent_result=_agent_result())
+    suite_metrics = {"local": compute_metrics([outcome])}
+    all_outcomes = {"local": [outcome]}
+    summary = render_artifact_summary(suite_metrics, all_outcomes, provenance)
+    assert "工作区状态提示" in summary
+    assert "未提交改动" in summary
+
+
+def test_render_artifact_summary_no_warning_when_clean():
+    """DS-R3 [R3-2]: summary.md must NOT show git_dirty warning when clean."""
+    config = AgentConfig()
+    provenance = build_provenance(config, "all", None, ["L01"], "abc", False)
+    outcome = _outcome(agent_result=_agent_result())
+    suite_metrics = {"local": compute_metrics([outcome])}
+    all_outcomes = {"local": [outcome]}
+    summary = render_artifact_summary(suite_metrics, all_outcomes, provenance)
+    assert "工作区状态提示" not in summary
+
+
+def test_write_artifact_generates_all_files(tmp_path):
+    """DS-R3 正向: write_artifact must generate summary.md, results.json, provenance.json."""
+    artifact_dir = str(tmp_path / "test-artifact")
+    config = AgentConfig()
+    outcome = _outcome(agent_result=_agent_result())
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, None)
+
+    assert os.path.isfile(os.path.join(artifact_dir, "summary.md"))
+    assert os.path.isfile(os.path.join(artifact_dir, "results.json"))
+    assert os.path.isfile(os.path.join(artifact_dir, "provenance.json"))
+
+    # Verify results case count matches metrics denominator (1 case)
+    with open(os.path.join(artifact_dir, "results.json"), encoding="utf-8") as f:
+        results = json.load(f)
+    assert len(results["cases"]) == 1
+
+
+def test_write_artifact_nonempty_dir_fails(tmp_path):
+    """DS-R3 负向: artifact dir already exists and non-empty → ArtifactError."""
+    artifact_dir = str(tmp_path / "existing-artifact")
+    os.makedirs(artifact_dir)
+    with open(os.path.join(artifact_dir, "old.txt"), "w") as f:
+        f.write("old")
+
+    config = AgentConfig()
+    outcome = _outcome(agent_result=_agent_result())
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    with pytest.raises(ArtifactError, match="已存在且非空"):
+        write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, None)
+
+
+def test_write_artifact_gitkeep_only_dir_succeeds(tmp_path):
+    """DS-R3: artifact dir exists but only has .gitkeep → should succeed."""
+    artifact_dir = str(tmp_path / "gitkeep-only")
+    os.makedirs(artifact_dir)
+    with open(os.path.join(artifact_dir, ".gitkeep"), "w") as f:
+        f.write("")
+
+    config = AgentConfig()
+    outcome = _outcome(agent_result=_agent_result())
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, None)
+    assert os.path.isfile(os.path.join(artifact_dir, "results.json"))
+
+
+def test_write_artifact_archive_traces_copies_files(tmp_path):
+    """DS-R3 正向: --archive-case-traces copies trace.jsonl, report.json, screenshots."""
+    # Create a fake trace dir
+    trace_dir = str(tmp_path / "fake-trace")
+    os.makedirs(trace_dir)
+    with open(os.path.join(trace_dir, "trace.jsonl"), "w", encoding="utf-8") as f:
+        f.write('{"step": 0}\n')
+    with open(os.path.join(trace_dir, "report.json"), "w", encoding="utf-8") as f:
+        json.dump({"success": True}, f)
+    with open(os.path.join(trace_dir, "step-001.png"), "wb") as f:
+        f.write(b"fake png")
+
+    artifact_dir = str(tmp_path / "artifact-with-traces")
+    config = AgentConfig()
+    outcome = _outcome(agent_result=_agent_result(trace_dir=trace_dir))
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, ["L01"])
+
+    # Verify trace files copied
+    dest_trace = os.path.join(artifact_dir, "traces", "L01")
+    assert os.path.isfile(os.path.join(dest_trace, "trace.jsonl"))
+    assert os.path.isfile(os.path.join(dest_trace, "report.json"))
+    assert os.path.isfile(os.path.join(dest_trace, "step-001.png"))
+
+
+def test_write_artifact_archive_case_not_found_fails(tmp_path):
+    """DS-R3 负向: --archive-case-traces with non-existent case → ArtifactError."""
+    artifact_dir = str(tmp_path / "artifact-missing-case")
+    config = AgentConfig()
+    outcome = _outcome(agent_result=_agent_result())
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    with pytest.raises(ArtifactError, match="不存在"):
+        write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, ["X99"])
+
+
+def test_write_artifact_archive_trace_dir_missing_fails(tmp_path):
+    """DS-R3 负向: --archive-case-traces with missing trace dir → ArtifactError."""
+    artifact_dir = str(tmp_path / "artifact-missing-trace")
+    config = AgentConfig()
+    outcome = _outcome(agent_result=_agent_result(trace_dir="/nonexistent/path"))
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    with pytest.raises(ArtifactError, match="trace 目录不存在"):
+        write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, ["L01"])
+
+
+def test_write_artifact_crash_reason_recorded(tmp_path):
+    """DS-R3 负向: crashed case must have crash_reason in results, not marked as pass."""
+    artifact_dir = str(tmp_path / "artifact-crash")
+    config = AgentConfig()
+    outcome = _outcome(crash="runner exploded")
+    all_outcomes = {"local": [outcome]}
+    suite_metrics = {"local": compute_metrics([outcome])}
+
+    write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, None)
+
+    with open(os.path.join(artifact_dir, "results.json"), encoding="utf-8") as f:
+        results = json.load(f)
+    assert results["cases"][0]["crash_reason"] == "runner exploded"
+    assert results["cases"][0]["succeeded"] is False
+    assert results["cases"][0]["agent_result"] is None

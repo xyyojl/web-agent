@@ -48,3 +48,6 @@ test-results/
 traces/
 eval/eval_summary.md
 eval/ablation_results.json
+# DS-R3: artifact 目录可提交（可复核证据），不忽略
+!eval/artifacts/
+!eval/artifacts/**

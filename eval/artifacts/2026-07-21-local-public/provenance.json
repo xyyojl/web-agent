@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-07-21T06:49:46.297353+00:00",
+  "suite_argument": "all",
+  "case_argument": null,
+  "case_ids": [
+    "L01",
+    "L02",
+    "L03",
+    "L04",
+    "L05",
+    "L06",
+    "L07",
+    "L08",
+    "L09",
+    "L10",
+    "L11",
+    "P01",
+    "P02",
+    "P03",
+    "P04",
+    "P05"
+  ],
+  "model": "sensenova-6.7-flash-lite",
+  "vision": false,
+  "max_steps": 15,
+  "max_fail": 3,
+  "git_commit": "25c8974b07c66f209657e86bc61e4a58c961a9a9",
+  "git_dirty": true,
+  "artifact_format_version": 1
+}

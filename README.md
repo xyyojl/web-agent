@@ -151,6 +151,15 @@ uv run python eval/run_eval.py --suite public    # 公开 5 条
 uv run python eval/run_eval.py --suite all       # 全部
 ```
 
+生成可提交、可复核的评测 artifact：
+```bash
+uv run python eval/run_eval.py --suite all \
+  --artifact-dir eval/artifacts/<YYYY-MM-DD>-local-public \
+  --archive-case-traces L01,L03,L11
+```
+- `--artifact-dir`：指定后生成 `summary.md` / `results.json` / `provenance.json`，不传则保持原有 `eval_summary.md` 行为。
+- `--archive-case-traces`：归档指定 case 的 `trace.jsonl`、`report.json` 和截图到 artifact 目录的 `traces/<case_id>/` 下。
+
 > ⚠️ **`--suite local` 需要先起本地静态服务**：本地 11 条 case 的目标页面是 `http://localhost:8080/*.html`，对应 `eval/pages/` 下的静态 HTML 集。跑 `--suite local`（或 `all`）前需另开一个终端起服务，否则所有 case 会因连接超时而集体判负：
 >
 > ```bash
@@ -176,18 +185,21 @@ uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
 
 ## 📊 Eval 评估结果
 
-项目内置了自动化 Verifier 与指标评估机制，在运行评测后会在 `eval/` 目录生成直观的 `eval_summary.md` 报告。以下为最近一次 `--suite all` 的实测结果（2026-07-16）：
+评测结果以可提交、可复核的 artifact 形式存放在 `eval/artifacts/` 目录下。每份 artifact 包含：
 
-| 指标 | 本地任务 | 公开网页 | 目标值（MVP） |
-| :--- | :--- | :--- | :--- |
-| 任务成功率 (task_success_rate) | 11/11 | 5/5 | 本地 ≥ 70%，公开 ≥ 60% |
-| 步骤成功率 (step_success_rate) | 96% | 100% | ≥ 80% |
-| 平均执行步数 (avg_steps) | 2.3 | 1.6 | ≤ 8 步 |
-| 自恢复率 (recovery_rate) | 0/0 | 0/0 | ≥ 30% |
-| 反安全动作拦截率 (unsafe_action_block_rate) | 1/1 | 0/0 | = 100% |
-| 证据完整性 (evidence_completeness) | 11/11 | 5/5 | = 100% |
+- `summary.md`：人类可读的汇总报告（指标表、失败任务、基准有效性声明）
+- `results.json`：每个 case 的完整结构化结果（`agent_result` / `verify_result` / `crash_reason` 等）
+- `provenance.json`：运行参数、模型信息、git commit 等溯源信息
+- `traces/<case_id>/`：归档的 trace 文件（仅 `--archive-case-traces` 指定的代表 case）
 
-> 💡 `recovery_rate`、`unsafe_action_block_rate` 的分母只统计触发了对应场景的 case（分别对应"曾出现失败步骤"和"命中 `safety_block` 校验模式"）；本次两个 suite 里都没有出现失败步骤，公开网页 suite 也没有配置 `safety_block` case，因此显示为 `0/0`，不代表指标未达标。
+最新一次全量运行（`--suite all`）的 artifact：
+
+- **artifact 目录**：[eval/artifacts/2026-07-21-local-public/](eval/artifacts/2026-07-21-local-public)
+- **汇总报告**：[summary.md](eval/artifacts/2026-07-21-local-public/summary.md)（`generated_at` 见文件顶部）
+- **结构化结果**：[results.json](eval/artifacts/2026-07-21-local-public/results.json)
+- **溯源信息**：[provenance.json](eval/artifacts/2026-07-21-local-public/provenance.json)
+
+> ⚠️ **基准有效性**：public suite 结果基于外部网站在 `generated_at` 时刻的实际内容，网站变化后该 artifact 不再代表当前行为，请以最新 artifact 为准。
 
 运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
 
@@ -220,6 +232,23 @@ uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
 - 截图始终是**观察前**快照，不是动作后截图。
 
 > ⚠️ **第三方数据风险提示**：`tool_output` 和 `observation` 字段可能包含被抓取页面本身携带的第三方数据（如页面上展示的他人信息）。这类内容不属于用户输入，不在当前脱敏范围内。trace 中的 `url` 字段记录了数据来源页面。归档 trace 或 artifact 前，需人工检查是否包含敏感第三方内容。
+
+### Artifact 治理与合规说明
+
+**仓库体积治理**：
+
+- 单次 `--archive-case-traces` 归档的 case 数量建议不超过 5 个，且需在 PR 描述中说明归档理由。
+- `eval/artifacts/` 下超过 90 天且未被 README 引用的历史 artifact，允许在后续清理性 PR 中整体删除（不视为破坏可复核性，因为 README 只应引用当前有效 artifact）。
+
+**公开网站访问礼貌性与合规性**：
+
+`run_eval.py` 对 public suite 的请求遵守以下基本“礼貌性”约束：
+
+- 同一域名请求间增加最小间隔（2 秒），避免突发请求压力。
+- 遵守目标站点 `robots.txt` 中与自动化访问相关的限制；若 robots.txt 明确禁止访问对应路径，该 case 将被跳过并记录 `crash_reason=robots_txt_disallowed`。
+- 失败时使用有界退避重试（`browser_open` 的 `open_retry`，默认 2 次重试），不无限重试。
+
+归档到 Git 的截图/文本仅用于内部工程可复核目的。若目标站点存在明确的 robots/ToS 限制自动化抓取或存档，对应 case 应改为不归档 trace（仅保留 pass/fail 摘要），由实现者在归档前逐 case 确认。
 
 ---
 

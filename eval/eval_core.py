@@ -11,8 +11,11 @@ markdown 汇总报告，run_ablation.py 是两组对比）。
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 # eval/eval_core.py 位于项目子目录下，需要把项目根目录加进 sys.path，
 # 这样无论调用方从哪个工作目录执行、以何种方式 import 本模块，
@@ -34,6 +37,29 @@ from agent import (
 )
 
 logger = logging.getLogger(__name__)
+
+# DS-R3: Artifact 序列化相关常量
+_ARTIFACT_FORMAT_VERSION = 1
+
+# suite 标签和指标顺序——run_eval.py 的 eval_summary.md 渲染和
+# eval_core.py 的 artifact summary 渲染共用，避免两处分别定义导致漂移。
+_SUITE_LABELS = {"local": "本地任务", "public": "公开网页"}
+_METRIC_ORDER = (
+    "task_success_rate",
+    "step_success_rate",
+    "avg_steps",
+    "recovery_rate",
+    "unsafe_action_block_rate",
+    "evidence_completeness",
+)
+
+
+class ArtifactError(Exception):
+    """DS-R3: artifact 生成过程中的错误（目录已存在、case 不存在等）。
+
+    写 artifact 失败不得伪装成 eval 成功，调用方应捕获此异常并以非零状态退出。
+    """
+
 
 # case 目录锚定到项目根目录，不依赖当前工作目录，避免"在 eval/ 目录下
 # 运行脚本"和"在项目根目录下运行脚本"结果不一致。
@@ -296,3 +322,322 @@ def compute_raw_metrics(outcomes: list[CaseOutcome]) -> dict[str, float | int | 
         "step_total": step_total,
         "step_success_rate": (step_success_count / step_total) if step_total else None,
     }
+
+
+# ===========================================================================
+# DS-R3: Artifact 序列化——生成可提交、可复核的评测证据
+# ===========================================================================
+#
+# 当 run_eval.py 传入 --artifact-dir 时，调用 write_artifact() 生成：
+#   eval/artifacts/<dir>/
+#     summary.md         人类可读汇总（含指标表、失败任务、基准有效性声明）
+#     results.json       每个 case 的完整结构化结果（agent_result / verify_result 等）
+#     provenance.json    运行参数、模型、vision、git commit 等溯源信息
+#     traces/<case_id>/  归档的 trace.jsonl / report.json / 截图（仅 --archive-case-traces）
+#
+# 错误处理规则（Design Spec）：
+#   - artifact 目录已存在且非空 → ArtifactError（不覆盖旧证据）
+#   - --archive-case-traces 指定不存在 case 或不存在 trace 目录 → ArtifactError
+#   - 写 artifact 失败不得伪装成 eval 成功；进程以非零状态退出
+
+
+def _get_git_info() -> tuple[str | None, bool]:
+    """获取当前 git 仓库的 commit SHA 和工作区是否 dirty。
+
+    返回 (commit_sha, is_dirty)。git 不可用或不在 git 仓库中时，
+    commit_sha=None, is_dirty=False（Spec: 若不可获取则显式记录 unknown）。
+
+    [R3-2] is_dirty 用于 provenance.json 的 git_dirty 字段和 summary.md 的工作区提示。
+    """
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_PROJECT_ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        status = subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=_PROJECT_ROOT,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return sha, bool(status)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None, False
+
+
+def _build_case_record(outcome: CaseOutcome, suite: str) -> dict:
+    """构建 results.json 中单个 case 的记录。
+
+    DS-R3: 每个 case 必须包含 case_id / suite / succeeded / agent_result /
+    verify_result / crash_reason / last_screenshot / trace_dir。
+    """
+    last_screenshot = outcome.last_screenshot
+    if last_screenshot == "N/A":
+        last_screenshot = None
+    return {
+        "case_id": outcome.case.get("id", "?"),
+        "suite": suite,
+        "succeeded": outcome.succeeded,
+        "agent_result": outcome.agent_result,
+        "verify_result": outcome.verify_result,
+        "crash_reason": outcome.crash_reason,
+        "last_screenshot": last_screenshot,
+        "trace_dir": outcome.agent_result["trace_dir"] if outcome.agent_result else None,
+    }
+
+
+def build_results_json(
+    all_outcomes: dict[str, list[CaseOutcome]],
+) -> dict:
+    """构建 results.json 的完整结构。
+
+    遍历 local 和 public 两个 suite 的全部 outcomes，每个 case 生成一条记录。
+    """
+    cases = []
+    for suite in ("local", "public"):
+        if suite in all_outcomes:
+            for outcome in all_outcomes[suite]:
+                cases.append(_build_case_record(outcome, suite))
+    return {"cases": cases}
+
+
+def build_provenance(
+    config: AgentConfig,
+    suite_arg: str,
+    case_arg: str | None,
+    case_ids: list[str],
+    git_commit: str | None,
+    git_dirty: bool,
+) -> dict:
+    """构建 provenance.json 结构。
+
+    DS-R3: 必须包含 generated_at / suite_argument / case_argument / case_ids /
+    model / vision / max_steps / max_fail / git_commit / artifact_format_version。
+    [R3-2] 新增 git_dirty 字段，记录工作区是否有未提交改动。
+    """
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "suite_argument": suite_arg,
+        "case_argument": case_arg,
+        "case_ids": case_ids,
+        "model": config.model,
+        "vision": config.vision,
+        "max_steps": config.max_steps,
+        "max_fail": config.max_fail,
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "artifact_format_version": _ARTIFACT_FORMAT_VERSION,
+    }
+
+
+def render_artifact_summary(
+    suite_metrics: dict[str, dict[str, str]],
+    all_outcomes: dict[str, list[CaseOutcome]],
+    provenance: dict,
+) -> str:
+    """构建 artifact 的 summary.md 内容。
+
+    DS-R3: 基于 eval_summary.md 的格式，额外包含：
+    - [R3-2] git_dirty 时顶部工作区提示
+    - [R3-3] "基准有效性"小节，含 generated_at 和固定措辞声明
+    """
+    lines: list[str] = []
+
+    # [R3-2] git_dirty 工作区提示
+    if provenance.get("git_dirty"):
+        lines.append(
+            "> ⚠️ **工作区状态提示**：生成此 artifact 时工作区存在未提交改动，"
+            "结果可能不完全对应 `git_commit` 所指向的代码状态。"
+        )
+        lines.append("")
+
+    generated_at = provenance["generated_at"]
+    date_str = generated_at[:10]
+    lines.append(f"# Eval Artifact Summary — {date_str}")
+    lines.append(f"`generated_at`: {generated_at}")
+    lines.append(f"`git_commit`: {provenance.get('git_commit') or 'unknown'}")
+    lines.append("")
+
+    # 指标表格（与 eval_summary.md 格式一致）
+    suites_present = [s for s in ("local", "public") if s in suite_metrics]
+    if suites_present:
+        header = "| 指标 | " + " | ".join(_SUITE_LABELS[s] for s in suites_present) + " |"
+        divider = "|" + "---|" * (len(suites_present) + 1)
+        lines.append(header)
+        lines.append(divider)
+        for metric in _METRIC_ORDER:
+            row_values = " | ".join(suite_metrics[s][metric] for s in suites_present)
+            lines.append(f"| {metric} | {row_values} |")
+
+    # 失败任务表
+    lines.append("")
+    lines.append("## 失败任务")
+    lines.append("| Case ID | 任务 | fail_reason | 最后截图 |")
+    lines.append("|---------|------|-------------|---------|")
+    failed_rows = []
+    for suite in suites_present:
+        for outcome in all_outcomes[suite]:
+            if outcome.succeeded:
+                continue
+            case_id = outcome.case.get("id", "?")
+            task = outcome.case.get("task", "")
+            failed_rows.append(
+                f"| {case_id} | {task} | {outcome.display_fail_reason} | {outcome.last_screenshot} |"
+            )
+    lines.extend(failed_rows if failed_rows else ["| - | 无失败任务 | - | - |"])
+
+    # [R3-3] 基准有效性
+    lines.append("")
+    lines.append("## 基准有效性")
+    lines.append(f"`generated_at`: {generated_at}")
+    lines.append("")
+    lines.append(
+        "public suite 结果基于外部网站在生成时刻的实际内容，"
+        "网站变化后本 artifact 不再代表当前行为，请以最新 artifact 为准。"
+    )
+    lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def _archive_case_traces(
+    artifact_dir: str,
+    all_outcomes: dict[str, list[CaseOutcome]],
+    archive_case_ids: list[str],
+) -> None:
+    """将指定 case 的 trace 文件复制到 artifact 目录。
+
+    DS-R3: --archive-case-traces 指定的 case 的 trace.jsonl、report.json 和
+    截图（*.png）复制到 eval/artifacts/<dir>/traces/<case_id>/。
+
+    [R3-1] 前置条件：DS-Y3（trace 脱敏与字段补全）已完成，归档的 trace
+    已包含 trace_schema_version=2 的完整字段。L11（安全拦截 case）的
+    trace 在 DS-Y3 Implementation Contract 下已不记录敏感输入值，可安全归档。
+
+    错误处理：
+    - case ID 不在 outcomes 中 → ArtifactError
+    - case 的 trace_dir 不存在 → ArtifactError
+    """
+    # 构建 case_id → outcome 的映射
+    id_to_outcome: dict[str, CaseOutcome] = {}
+    for suite in ("local", "public"):
+        if suite in all_outcomes:
+            for outcome in all_outcomes[suite]:
+                cid = outcome.case.get("id", "?")
+                id_to_outcome[cid] = outcome
+
+    # 验证所有 archive case ID 都存在
+    missing = [cid for cid in archive_case_ids if cid not in id_to_outcome]
+    if missing:
+        raise ArtifactError(
+            f"--archive-case-traces 指定的 case 不存在: {', '.join(missing)}"
+        )
+
+    traces_dir = os.path.join(artifact_dir, "traces")
+    os.makedirs(traces_dir, exist_ok=True)
+
+    for case_id in archive_case_ids:
+        outcome = id_to_outcome[case_id]
+        if outcome.agent_result is None:
+            raise ArtifactError(
+                f"--archive-case-traces 指定的 case {case_id} 没有产生 agent_result，"
+                f"无法归档 trace"
+            )
+        trace_dir = outcome.agent_result["trace_dir"]
+        if not trace_dir or not os.path.isdir(trace_dir):
+            raise ArtifactError(
+                f"--archive-case-traces 指定的 case {case_id} 的 trace 目录不存在: {trace_dir}"
+            )
+
+        # 复制 trace.jsonl、report.json 和截图
+        dest_dir = os.path.join(traces_dir, case_id)
+        os.makedirs(dest_dir, exist_ok=True)
+
+        for fname in os.listdir(trace_dir):
+            # 只复制 trace.jsonl、report.json 和 *.png 截图
+            if fname == "trace.jsonl" or fname == "report.json" or fname.endswith(".png"):
+                src = os.path.join(trace_dir, fname)
+                dst = os.path.join(dest_dir, fname)
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+
+
+def write_artifact(
+    artifact_dir: str,
+    all_outcomes: dict[str, list[CaseOutcome]],
+    suite_metrics: dict[str, dict[str, str]],
+    config: AgentConfig,
+    suite_arg: str,
+    case_arg: str | None,
+    archive_case_ids: list[str] | None,
+) -> None:
+    """DS-R3: 生成可提交的评测 artifact。
+
+    在指定目录下生成：
+    - summary.md：人类可读的汇总报告
+    - results.json：每个 case 的完整结构化结果
+    - provenance.json：运行参数、模型信息、git commit 等
+    - traces/<case_id>/：归档的 trace 文件（仅当 archive_case_ids 非空时）
+
+    错误处理：
+    - artifact 目录已存在且非空 → ArtifactError（不覆盖旧证据）
+    - archive case 不存在或 trace 目录缺失 → ArtifactError
+    - 任何写入失败 → ArtifactError（不得伪装成 eval 成功）
+    """
+    # 转为绝对路径
+    artifact_dir = os.path.abspath(artifact_dir)
+
+    # 覆盖保护：目录已存在且非空时拒绝（忽略 .gitkeep）
+    if os.path.exists(artifact_dir) and os.path.isdir(artifact_dir):
+        existing = [f for f in os.listdir(artifact_dir) if f != ".gitkeep"]
+        if existing:
+            raise ArtifactError(
+                f"artifact 目录已存在且非空，拒绝覆盖: {artifact_dir}"
+            )
+
+    # 收集 case_ids
+    case_ids: list[str] = []
+    for suite in ("local", "public"):
+        if suite in all_outcomes:
+            for outcome in all_outcomes[suite]:
+                case_ids.append(outcome.case.get("id", "?"))
+
+    # 获取 git 信息 [R3-2]
+    git_commit, git_dirty = _get_git_info()
+
+    # 构建并写入各文件
+    os.makedirs(artifact_dir, exist_ok=True)
+
+    try:
+        # provenance.json
+        provenance = build_provenance(
+            config, suite_arg, case_arg, case_ids, git_commit, git_dirty,
+        )
+        provenance_path = os.path.join(artifact_dir, "provenance.json")
+        with open(provenance_path, "w", encoding="utf-8") as f:
+            json.dump(provenance, f, ensure_ascii=False, indent=2)
+
+        # results.json
+        results = build_results_json(all_outcomes)
+        results_path = os.path.join(artifact_dir, "results.json")
+        with open(results_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+
+        # summary.md
+        summary_md = render_artifact_summary(suite_metrics, all_outcomes, provenance)
+        summary_path = os.path.join(artifact_dir, "summary.md")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(summary_md)
+
+        # trace 归档
+        if archive_case_ids:
+            _archive_case_traces(artifact_dir, all_outcomes, archive_case_ids)
+
+        logger.info("artifact 已生成: %s", artifact_dir)
+
+    except ArtifactError:
+        raise
+    except Exception as exc:
+        raise ArtifactError(f"写 artifact 失败: {exc}") from exc

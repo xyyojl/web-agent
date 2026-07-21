@@ -17,42 +17,47 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
+from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# 同 eval_core.py 的路径约定：把项目根目录加进 sys.path，这样无论从哪个
-# 工作目录执行 `python eval/run_eval.py`，`import eval_core` / `from agent
-# import ...` 都能正常解析，不依赖调用者提前设置 PYTHONPATH。
+# 把项目根目录加进 sys.path，这样无论从哪个工作目录执行
+# `python eval/run_eval.py`，`from eval.eval_core import ...` /
+# `from agent import ...` 都能正常解析，不依赖调用者提前设置 PYTHONPATH。
 _PROJECT_ROOT: str = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# eval/run_eval.py 与 eval/eval_core.py 同目录，脚本自身所在目录会被
-# Python 自动加进 sys.path[0]，因此可以直接 `import eval_core`。
-from eval_core import (  #（sys.path 必须先于这行执行）
+from eval.eval_core import (  #（sys.path 必须先于这行执行）
     CASE_DIRS,
     AgentConfig,
+    ArtifactError,
     CaseOutcome,
     EvalCase,
+    _METRIC_ORDER,
+    _SUITE_LABELS,
     compute_metrics,
     load_cases,
     run_one_case,
+    write_artifact,
 )
 
 logger = logging.getLogger(__name__)
 
 _SUMMARY_PATH = os.path.join(_PROJECT_ROOT, "eval", "eval_summary.md")
-_SUITE_LABELS = {"local": "本地任务", "public": "公开网页"}
-_METRIC_ORDER = (
-    "task_success_rate",
-    "step_success_rate",
-    "avg_steps",
-    "recovery_rate",
-    "unsafe_action_block_rate",
-    "evidence_completeness",
-)
+
+# [R3-5] public suite 礼貌性约束：同一域名请求间最小间隔（秒）。
+# 实现者判断点：2 秒足以避免对目标站点造成突发请求压力，同时不过分拖慢 eval。
+_PUBLIC_REQUEST_MIN_INTERVAL = 2.0
+
+# 记录各域名最近一次访问时间，用于同域名礼貌性间隔控制
+_last_domain_access: dict[str, float] = {}
 
 
 def _render_summary_md(
@@ -93,11 +98,66 @@ def _render_summary_md(
     return "\n".join(lines) + "\n"
 
 
+def _check_robots_txt(url: str) -> bool:
+    """[R3-5] 检查 URL 是否被目标站点的 robots.txt 允许。
+
+    public suite 礼貌性约束之一。使用 httpx 同步获取 robots.txt（设置超时），
+    用 RobotFileParser 判定是否允许 WebAgent 访问。
+    无法获取 robots.txt（网络错误、404 等）时保守地返回 True（允许），
+    避免因 robots.txt 不可达而阻止正常评测。
+    """
+    parsed = urlparse(url)
+    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+    rp = RobotFileParser()
+    try:
+        resp = httpx.get(robots_url, timeout=5, follow_redirects=True)
+        if resp.status_code == 200:
+            rp.parse(resp.text.splitlines())
+            return rp.can_fetch("WebAgent", url)
+        # 404 或其他状态码：没有 robots.txt 限制，允许
+        return True
+    except (httpx.RequestError, OSError, ValueError) as exc:
+        logger.warning("无法获取 robots.txt: %s，保守允许访问（%s）", robots_url, exc)
+        return True
+
+
+async def _enforce_domain_politeness(url: str) -> None:
+    """[R3-5] 同一域名请求间增加最小间隔。
+
+    public suite 礼貌性约束之一。记录各域名最近一次访问时间，
+    若距上次访问不足 _PUBLIC_REQUEST_MIN_INTERVAL 秒则等待。
+    """
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    now = time.monotonic()
+    last = _last_domain_access.get(domain)
+    if last is not None:
+        elapsed = now - last
+        if elapsed < _PUBLIC_REQUEST_MIN_INTERVAL:
+            wait = _PUBLIC_REQUEST_MIN_INTERVAL - elapsed
+            logger.info("域名 %s 礼貌性等待 %.1f 秒", domain, wait)
+            await asyncio.sleep(wait)
+    _last_domain_access[domain] = time.monotonic()
+
+
 async def _run_suite(suite: str, config: AgentConfig) -> list[CaseOutcome]:
     cases = load_cases(CASE_DIRS[suite])
     outcomes: list[CaseOutcome] = []
     for idx, case in enumerate(cases):
         case_id = case.get("id", "?")
+
+        # [R3-5] public suite 礼貌性约束：robots.txt 检查 + 域名间隔
+        if suite == "public":
+            url = case.get("url", "")
+            if url and not _check_robots_txt(url):
+                logger.warning("case %s 的 URL 被 robots.txt 禁止，跳过: %s", case_id, url)
+                outcome = CaseOutcome(case=case)
+                outcome.crash_reason = "robots_txt_disallowed"
+                outcomes.append(outcome)
+                continue
+            if url:
+                await _enforce_domain_politeness(url)
+
         logger.info("运行 case %s: %s", case_id, case.get("task", ""))
         outcome = await run_one_case(case, config)
         status = "PASS" if outcome.succeeded else "FAIL"
@@ -115,7 +175,12 @@ async def _run_suite(suite: str, config: AgentConfig) -> list[CaseOutcome]:
     return outcomes
 
 
-async def main_async(suite_arg: str, case_arg: str | None = None) -> None:
+async def main_async(
+    suite_arg: str,
+    case_arg: str | None = None,
+    artifact_dir: str | None = None,
+    archive_case_ids: list[str] | None = None,
+) -> None:
     config = AgentConfig.from_env()
 
     all_outcomes: dict[str, list[CaseOutcome]] = {}
@@ -148,7 +213,21 @@ async def main_async(suite_arg: str, case_arg: str | None = None) -> None:
         assert found_suite is not None  # 类型收窄：消除 str|None 警告
 
         logger.info("运行单个 case [%s] (来自 %s 套件)", found_case.get("id", "?"), found_suite)
-        outcome = await run_one_case(found_case, config)
+
+        # [R3-5] public suite 礼貌性约束
+        if found_suite == "public":
+            url = found_case.get("url", "")
+            if url and not _check_robots_txt(url):
+                logger.warning("case %s 的 URL 被 robots.txt 禁止，跳过", case_arg)
+                outcome = CaseOutcome(case=found_case)
+                outcome.crash_reason = "robots_txt_disallowed"
+            else:
+                if url:
+                    await _enforce_domain_politeness(url)
+                outcome = await run_one_case(found_case, config)
+        else:
+            outcome = await run_one_case(found_case, config)
+
         status = "PASS" if outcome.succeeded else "FAIL"
         logger.info("case %s 完成: %s", found_case.get("id", "?"), status)
 
@@ -174,6 +253,23 @@ async def main_async(suite_arg: str, case_arg: str | None = None) -> None:
     print(summary_md)
     print(f"已写入 {_SUMMARY_PATH}")
 
+    # DS-R3: 生成可提交 artifact
+    if artifact_dir:
+        try:
+            write_artifact(
+                artifact_dir=artifact_dir,
+                all_outcomes=all_outcomes,
+                suite_metrics=suite_metrics,
+                config=config,
+                suite_arg=suite_arg,
+                case_arg=case_arg,
+                archive_case_ids=archive_case_ids,
+            )
+            print(f"artifact 已生成: {os.path.abspath(artifact_dir)}")
+        except ArtifactError as exc:
+            logger.error("生成 artifact 失败: %s", exc)
+            sys.exit(1)
+
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -189,8 +285,32 @@ def main() -> None:
         default=None,
         help="指定要运行的单个 case ID 或文件名（例如 local_01 或 local_01.json）",
     )
+    parser.add_argument(
+        "--artifact-dir",
+        default=None,
+        help="指定 artifact 输出目录（相对路径），生成可提交的评测证据",
+    )
+    parser.add_argument(
+        "--archive-case-traces",
+        default=None,
+        help="逗号分隔的 case ID 列表，归档指定 case 的 trace（仅在 --artifact-dir 有效时生效）",
+    )
     args = parser.parse_args()
-    asyncio.run(main_async(args.suite, args.case))
+
+    # 解析 archive-case-traces
+    archive_case_ids: list[str] | None = None
+    if args.archive_case_traces:
+        archive_case_ids = [c.strip() for c in args.archive_case_traces.split(",") if c.strip()]
+        if not args.artifact_dir:
+            logger.warning("--archive-case-traces 仅在指定 --artifact-dir 时有效，已忽略")
+            archive_case_ids = None
+
+    asyncio.run(main_async(
+        args.suite,
+        args.case,
+        artifact_dir=args.artifact_dir,
+        archive_case_ids=archive_case_ids,
+    ))
 
 
 if __name__ == "__main__":

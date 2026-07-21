@@ -22,16 +22,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 与 eval_core.py 同一套路径约定：把项目根目录加进 sys.path，使得无论从
-# 哪个工作目录执行 `python eval/run_ablation.py`，`import eval_core` /
+# 把项目根目录加进 sys.path，使得无论从哪个工作目录执行
+# `python eval/run_ablation.py`，`from eval.eval_core import ...` /
 # `from agent import ...` 都能正常解析。
 _PROJECT_ROOT: str = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-# eval/run_ablation.py 与 eval/eval_core.py 同目录，脚本自身所在目录会被
-# Python 自动加进 sys.path[0]，因此可以直接 `import eval_core`。
-from eval_core import (  # noqa: E402  （sys.path 必须先于这行执行）
+from eval.eval_core import (  #（sys.path 必须先于这行执行）
     CASE_DIRS,
     AgentConfig,
     CaseOutcome,
