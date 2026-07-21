@@ -154,7 +154,7 @@ uv run python eval/run_eval.py --suite all       # 全部
 生成可提交、可复核的评测 artifact：
 ```bash
 uv run python eval/run_eval.py --suite all \
-  --artifact-dir eval/artifacts/<YYYY-MM-DD>-local-public \
+  --artifact-dir eval/artifacts/<YYYYMMDD>-local-public \
   --archive-case-traces L01,L03,L11
 ```
 - `--artifact-dir`：指定后生成 `summary.md` / `results.json` / `provenance.json`，不传则保持原有 `eval_summary.md` 行为。
@@ -203,7 +203,22 @@ uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
 
 运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
 
-> 💡 **消融实验**：在本地 10 项任务上对照 DOM-only vs DOM+Vision 两组，任务成功率打平（10/10），平均步数减少 20%（2.5 → 2.0，以 DOM-only 为基准），差异出现在两类任务上——需要确认页面状态变化的（标签页导航、表单填写）和纯文本/结构化抽取的（文本查找、表格抽取），说明视觉信号主要提升的是多模态 Agent 的**执行效率**而非**准确率**。完整报告含逐 case 步数对比与分析：[ablation_report.md](eval/ablation_report.md)
+> 💡 **消融实验**：在本地 10 项任务上对照 DOM-only vs DOM+Vision 两组（每组运行 3 次，共 60 次运行），任务成功率打平（30/30），平均步数从 2.53 降至 2.17（以 DOM-only 为基准，相对降幅约 14.5%），差异稳定出现在需要确认页面状态变化的任务（标签页导航、表单填写）上，说明视觉信号主要提升的是多模态 Agent 的**执行效率**而非**准确率**。完整报告含逐 case 步数对比与分析：[ablation_report.md](eval/ablation_report.md)，可复核 artifact：[eval/artifacts/ablation-20260721/](eval/artifacts/ablation-20260721)
+
+#### 运行消融实验
+
+```bash
+uv run python eval/run_ablation.py --suite local \
+  --artifact-dir eval/artifacts/ablation-<YYYYMMDD>
+```
+
+- `--artifact-dir`：指定后生成可提交的消融实验 artifact（`ablation_results.json` + `summary.md`），包含原始结果、实验配置（模型 / `prompt_fingerprint` / `sampling_params` / `git_commit`）、明确 case 列表（`included_case_ids` / `excluded_case_ids`）和每 case 的 `runs[]` 数组。不传则仅写本地忽略的 `eval/ablation_results.json`。
+- `--run-count <n>`：每组每个 case 运行 n 次（默认 1），>1 时每个 case 存 `runs[]` 数组，报告中展示的均值/成功率等聚合指标可从 `runs[]` 原始数据重新计算得出。
+- `--exclude-from-avg <case-ids>`：指定运行但不参与 Vision 效率均值的 case（默认 `L11`，安全回归 case，其失败是安全机制预期内的主动拦截，不反映 Vision 对任务解题的影响）。
+
+> ⚠️ **一致性验证**：脚本在生成 artifact 前会验证两组 case 集一致性以及 `included` / `excluded` 与实际运行 case 的匹配，不一致则失败、禁止输出差异结论。
+>
+> **模型快照说明**：`model` 字段记录的是供应商别名，供应商可能对别名指向的底层模型做未公示更新，历史 artifact 的可复现性受此限制（详见 artifact 中的 `model_pinning_caveat` 字段）。
 
 ### Trace 格式说明（trace_schema_version=2）
 
