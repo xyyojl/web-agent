@@ -1,0 +1,93 @@
+# GitHub CI: unit tests (no browser) + integration tests (real Chromium).
+#
+# DS-Y4 Implementation Contract:
+# - CI 不运行 public eval、不调用 Anthropic 兼容 API、不需要 secret。
+# - CI 必须使用锁定依赖: uv sync --frozen。
+# - 不得把 traces/、浏览器缓存和临时截图提交到 Git。
+#
+# [Y4-2] Flaky 重试策略说明：
+# 集成测试在 CI 中允许有限重试（仅对首次失败的测试重试 1 次），
+# 重试行为通过 ::warning:: 和 --last-failed 输出在 workflow 日志中可见。
+# 该策略仅用于缓解环境噪声（如浏览器启动竞态、CI 资源波动），
+# 不用于掩盖代码缺陷——持续 flaky 的测试应被修复而非依赖重试。
+#
+# [Y4-1] 浏览器版本锁定与缓存：
+# Playwright 浏览器版本随 pyproject.toml 中 playwright 包版本一并锁定
+# （uv.lock 固定该版本），CI 通过 playwright install --with-deps chromium
+# 安装该版本对应的浏览器二进制，不使用"始终装最新"。
+# 浏览器二进制启用 CI 缓存，cache key 基于操作系统 + uv.lock 哈希
+# （uv.lock 变化即代表 playwright 版本可能变化，缓存自然失效）。
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Run unit tests (no browser required)
+        run: uv run pytest tests/ -m "not integration" -q
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      # [Y4-1] Cache Playwright browser binaries.
+      # Key includes runner OS + uv.lock hash so that a dependency change
+      # (which may bump the playwright version) automatically invalidates
+      # the cache, ensuring the installed browser matches the locked version.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      # [Y4-1] Install the browser version matching the locked playwright
+      # package version (not "latest"). --with-deps installs OS-level
+      # dependencies needed by Chromium.
+      - name: Install Chromium
+        run: uv run playwright install --with-deps chromium
+
+      # [Y4-2] Flaky retry: first attempt runs all integration tests.
+      # If it fails, only the failed tests are retried once (--last-failed).
+      # The retry is visible in the workflow log via ::warning::.
+      - name: Run integration tests (first attempt)
+        id: integration-first
+        continue-on-error: true
+        run: uv run pytest tests/integration/ -m integration -v
+
+      - name: Retry failed integration tests (flaky retry, max 1)
+        if: steps.integration-first.outcome == 'failure'
+        run: |
+          echo "::warning::Some integration tests failed on first attempt, retrying failed tests once (flaky retry policy)."
+          uv run pytest tests/integration/ -m integration -v --last-failed

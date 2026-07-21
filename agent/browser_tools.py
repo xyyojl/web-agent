@@ -307,16 +307,35 @@ NOISE_SELECTORS: list[str] = []
 # 避免 SPA 异步渲染尚未完成就读取指纹导致假阴性。等待超时不算错误。
 _ASYNC_RENDER_WAIT_MS = 200
 
-# 读取 document.body.innerText 并剔除 noise selectors 区域的 JS 表达式
+# 读取 document.body.innerText 并剔除 noise selectors 区域的 JS 表达式。
+#
+# 注意：不能用 cloneNode(true) + innerText —— 克隆节点脱离文档后没有
+# computed style，innerText 退化为类似 textContent 的行为，不感知
+# display:none，导致 tab 切换等纯视觉变化（URL 不变、面板 show/hide）
+# 无法被指纹检测到。必须在 live document.body 上计算 innerText。
+#
+# noise selectors 为空时直接读取；非空时临时隐藏 noise 元素再计算、
+# 计算后恢复，保证不影响页面真实状态。page.evaluate() 执行的 JS 是
+# 同步的，临时隐藏-恢复期间不会有其他脚本穿插执行。
 _GET_INNER_TEXT_JS = """
 (noiseSelectors) => {
-    const body = document.body.cloneNode(true);
+    if (!noiseSelectors || noiseSelectors.length === 0) {
+        return (document.body.innerText || '').trim();
+    }
+    const hidden = [];
     for (const selector of noiseSelectors) {
         try {
-            body.querySelectorAll(selector).forEach(el => el.remove());
+            document.querySelectorAll(selector).forEach(el => {
+                hidden.push({el, display: el.style.display});
+                el.style.display = 'none';
+            });
         } catch(e) {}
     }
-    return (body.innerText || '').trim();
+    const text = (document.body.innerText || '').trim();
+    for (const item of hidden) {
+        item.el.style.display = item.display;
+    }
+    return text;
 }
 """
 
