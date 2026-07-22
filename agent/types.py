@@ -8,6 +8,17 @@ class Element(TypedDict):
     href:     str | None
 
 
+class ContentSafetySignal(TypedDict):
+    rule_id: str
+    source: str
+    content_sha256: str
+
+
+class ContentSafetyAssessment(TypedDict):
+    status: Literal["clean", "suspected", "blocked"]
+    signals: list[ContentSafetySignal]
+
+
 class ObserveResult(TypedDict):
     url:                  str
     title:                str
@@ -16,6 +27,7 @@ class ObserveResult(TypedDict):
     interactive_elements: list[Element]
     screenshot_path:      str
     screenshot_b64:       NotRequired[str | None]
+    content_safety:       NotRequired[ContentSafetyAssessment]
 
 
 class LLMAction(TypedDict):

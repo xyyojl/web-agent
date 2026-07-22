@@ -10,8 +10,8 @@ from anthropic.types import Message, MessageParam, TextBlock
 
 from agent.config import AgentConfig
 from agent.llm_client import LLMClient, LLMOutputRetry
-from agent.prompts import PLANNER_SYSTEM, PLANNER_USER_TMPL
-from agent.types import ObserveResult
+from agent.prompts import PLANNER_SYSTEM, PLANNER_USER_TMPL, format_untrusted_page_content
+from agent.types import ContentSafetyAssessment, ObserveResult
 from agent.vision import build_vision_user_content
 
 logger = logging.getLogger(__name__)
@@ -29,23 +29,17 @@ def _format_observation(obs: ObserveResult) -> str:
     Planner 的上下文里根本不存在 selector，从源头上降低它在 plan 里
     "抄" 出 CSS/XPath 语法的概率，比单纯靠 Prompt 约束更可靠。
     """
-    lines = [
-        f"URL: {obs['url']}",
-        f"标题: {obs['title']}",
-        f"可见文本摘要: {obs['visible_text_summary']}",
-        "当前页面交互元素（仅角色与文本，不含定位信息）：",
-    ]
-    elements = obs["interactive_elements"]
-    if not elements:
-        lines.append("  （未检测到交互元素）")
-    else:
-        for idx, el in enumerate(elements, start=1):
-            name = el["name"] or "(无文本)"
-            # Planner 判断"任务已完成/可直接给出答案"时能看到真实目标，
-            # 而不是像此前那样看不到 href 只能靠 LLM 常识编造。
-            href_info = f" href={el['href']}" if el.get("href") else ""
-            lines.append(f"  {idx}. [{el['role']}] {name}{href_info}")
-    return "\n".join(lines)
+    return format_untrusted_page_content(
+        {
+            "url": obs["url"], "title": obs["title"],
+            "visible_text_summary": obs["visible_text_summary"],
+            "interactive_elements": [
+                {"role": el["role"], "name": el["name"], "href": el.get("href")}
+                for el in obs["interactive_elements"]
+            ],
+            "content_safety": obs.get("content_safety", ContentSafetyAssessment(status="clean", signals=[])),
+        }
+    )
 
 
 def _contains_selector_syntax(text: str) -> bool:

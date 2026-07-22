@@ -22,9 +22,9 @@ from agent.config import AgentConfig
 from agent.exceptions import BrowserError, LLMError, SafetyError
 from agent.llm_client import LLMClient, LLMOutputRetry
 from agent.observer import BrowserStateObserver
-from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL
+from agent.prompts import EXTRACTOR_SYSTEM, EXTRACTOR_USER_TMPL, format_untrusted_page_content
 from agent.tracer import TraceLogger
-from agent.types import ObserveResult, ToolResult
+from agent.types import ContentSafetyAssessment, ObserveResult, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -657,9 +657,12 @@ async def browser_extract(
 
     base_prompt = EXTRACTOR_USER_TMPL.format(
         instruction=instruction,
-        title=obs["title"],
-        visible_text_summary=obs["visible_text_summary"],
-        links_info=await _format_links_info(page),
+        page_content=format_untrusted_page_content({
+            "title": obs["title"],
+            "visible_text_summary": obs["visible_text_summary"],
+            "links_info": await _format_links_info(page),
+            "content_safety": obs.get("content_safety", ContentSafetyAssessment(status="clean", signals=[])),
+        }),
     )
 
     try:

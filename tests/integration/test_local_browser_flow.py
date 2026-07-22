@@ -124,6 +124,28 @@ async def test_observer_generates_png_and_text_hash(browser_page, pages_dir, tmp
     assert str(tmp_path) in result["screenshot_path"]
 
 
+@pytest.mark.integration
+async def test_observer_uses_unique_css_selector_for_duplicate_link_text(browser_page, tmp_path):
+    """同名链接不能生成会触发 Playwright strict mode 的 text= selector。"""
+    page = browser_page
+    await page.set_content("""
+        <main><a href="#first">asyncio — Asynchronous I/O</a></main>
+        <footer><a href="#second">asyncio — Asynchronous I/O</a></footer>
+    """)
+    observer = BrowserStateObserver(AgentConfig(), TraceLogger(base_dir=str(tmp_path / "traces")))
+
+    result = await observer.observe(page)
+    duplicate_links = [
+        el for el in result["interactive_elements"]
+        if el["name"] == "asyncio — Asynchronous I/O"
+    ]
+
+    assert len(duplicate_links) == 2
+    assert all(el["selector"].startswith("css=body >") for el in duplicate_links)
+    for element in duplicate_links:
+        assert await page.locator(element["selector"].removeprefix("css=")).count() == 1
+
+
 # ---------- 负向验证 ----------
 
 

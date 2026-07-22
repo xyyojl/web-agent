@@ -20,8 +20,8 @@ from anthropic.types import (
 
 from agent.config import AgentConfig
 from agent.llm_client import LLMClient, LLMOutputRetry
-from agent.prompts import SELECTOR_SYSTEM, SELECTOR_TOOLS
-from agent.types import LLMAction, ObserveResult
+from agent.prompts import SELECTOR_SYSTEM, SELECTOR_TOOLS, format_untrusted_page_content
+from agent.types import ContentSafetyAssessment, LLMAction, ObserveResult
 from agent.vision import build_vision_user_content
 
 logger = logging.getLogger(__name__)
@@ -35,21 +35,17 @@ def _format_observation(obs: ObserveResult) -> str:
     与 WebPlanner._format_observation 刻意相反——ActionSelector 的职责
     就是从候选 selector 中原样挑一个填进 tool_use，必须能看到它们。
     """
-    lines = [
-        f"URL: {obs['url']}",
-        f"标题: {obs['title']}",
-        "当前页面交互元素（selector 必须从下列列表中原样选取，禁止臆造/拼接）：",
-    ]
-    elements = obs["interactive_elements"]
-    if not elements:
-        lines.append("  （未检测到交互元素，如需操作请优先考虑 scroll 或 screenshot）")
-    else:
-        for idx, el in enumerate(elements, start=1):
-            name = el["name"] or "(无文本)"
-            lines.append(
-                f'  {idx}. role={el["role"]} name="{name}" selector={el["selector"]}'
-            )
-    return "\n".join(lines)
+    return format_untrusted_page_content(
+        {
+            "url": obs["url"], "title": obs["title"],
+            "visible_text_summary": obs["visible_text_summary"],
+            "interactive_elements": [
+                {"role": el["role"], "name": el["name"], "selector": el["selector"], "href": el.get("href")}
+                for el in obs["interactive_elements"]
+            ],
+            "content_safety": obs.get("content_safety", ContentSafetyAssessment(status="clean", signals=[])),
+        }
+    )
 
 
 def _extract_tool_use(message: Message) -> ToolUseBlock | None:
@@ -167,7 +163,7 @@ class ActionSelector:
         tool_use block、tool_use.name 不在合法工具集合内、input 字段
         缺失或取值非法。
         """
-        user_content = build_vision_user_content(obs, f"行动计划：{plan}\n\n{_format_observation(obs)}")
+        user_content = build_vision_user_content(obs, f"<trusted_planner_plan>{plan}</trusted_planner_plan>\n\n{_format_observation(obs)}")
         messages: list[MessageParam] = cast(
             "list[MessageParam]", [*history, {"role": "user", "content": user_content}]
         )

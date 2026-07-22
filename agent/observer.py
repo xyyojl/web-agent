@@ -6,17 +6,128 @@
 
 import base64
 import hashlib
+import itertools
+import json
 import logging
 import re
+import unicodedata
+from typing import Literal
 
 from playwright.async_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 from agent.config import AgentConfig
 from agent.exceptions import BrowserError
 from agent.tracer import TraceLogger
-from agent.types import Element, ObserveResult
+from agent.types import ContentSafetyAssessment, ContentSafetySignal, Element, ObserveResult
 
 logger = logging.getLogger(__name__)
+
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+_WHITESPACE_RE = re.compile(r"\s+")
+_OVERRIDE_TERMS = ("忽略", "无视", "override", "disregard", "ignore")
+_TARGET_TERMS = ("system", "previous", "指令", "规则")
+_ACTION_TERMS = (
+    "click", "type", "input", "navigate", "visit", "submit", "send", "upload", "post", "copy", "paste",
+    "上传", "跳转", "访问", "填写", "提交", "发送", "粘贴",
+)
+_SENSITIVE_TERMS = (
+    "api key", "api_key", "token", "secret", "password", "cookie", "history", "conversation",
+    "密钥", "令牌", "密码", "对话", "历史",
+)
+_ROLE_PREFIXES = ("[system]", "system:", "assistant:", "developer:", "<system>")
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _normalise_untrusted_content(content: str) -> str:
+    return _WHITESPACE_RE.sub(" ", _ZERO_WIDTH_RE.sub("", unicodedata.normalize("NFKC", content)).lower()).strip()
+
+
+def _has_terms_within_window(text: str, groups: tuple[tuple[str, ...], ...], window: int = 200) -> bool:
+    positions: list[list[int]] = [
+        [match.start() for term in group for match in re.finditer(re.escape(term), text)]
+        for group in groups
+    ]
+    if any(not group_positions for group_positions in positions):
+        return False
+    return any(int(max(combo)) - int(min(combo)) <= window for combo in itertools.product(*positions))
+
+
+def _has_exfiltration_terms_within_window(text: str, window: int = 200) -> bool:
+    """要求敏感词、外传动作和外部目的地共同出现在同一局部上下文。
+
+    仅在同一个长页面内分别出现「Copy instructions」「Release history」和
+    文档 URL 不构成数据外传；三个证据必须能组成同一条局部指令，才是高置信
+    PI-EXFIL-001。URL 使用正则位置而不是固定词表，避免把真实目的地内容丢失。
+    """
+    sensitive_positions = [match.start() for term in _SENSITIVE_TERMS for match in re.finditer(re.escape(term), text)]
+    action_positions = [match.start() for term in _ACTION_TERMS for match in re.finditer(re.escape(term), text)]
+    url_positions = [match.start() for match in _URL_RE.finditer(text)]
+    return bool(sensitive_positions and action_positions and url_positions) and any(
+        max(combo) - min(combo) <= window
+        for combo in itertools.product(sensitive_positions, action_positions, url_positions)
+    )
+
+
+def inspect_untrusted_content(content: object, source: str) -> ContentSafetyAssessment:
+    """检测进入 Agent 上下文的不可信内容；只返回规则与哈希，不回传原文。"""
+    try:
+        raw = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+        normalised = _normalise_untrusted_content(raw)
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        signals: list[ContentSafetySignal] = []
+
+        def add(rule_id: str) -> None:
+            signals.append(ContentSafetySignal(rule_id=rule_id, source=source, content_sha256=digest))
+
+        if _has_terms_within_window(normalised, (_OVERRIDE_TERMS, _TARGET_TERMS, _ACTION_TERMS)):
+            add("PI-OVERRIDE-001")
+
+        line_normalised = _ZERO_WIDTH_RE.sub("", unicodedata.normalize("NFKC", raw)).lower()
+        lines = [line.strip() for line in line_normalised.splitlines()] or [normalised]
+        for index, line in enumerate(lines):
+            if line.strip().startswith(_ROLE_PREFIXES):
+                nearby = " ".join(lines[index : index + 3])
+                if any(term in nearby for term in _ACTION_TERMS):
+                    add("PI-ROLE-001")
+                else:
+                    add("PI-ROLE-SUSPECTED-001")
+                break
+
+        if _has_exfiltration_terms_within_window(normalised):
+            add("PI-EXFIL-001")
+        elif any(term in normalised for term in _SENSITIVE_TERMS) and _URL_RE.search(normalised):
+            add("PI-EXFIL-SUSPECTED-001")
+        elif _has_terms_within_window(normalised, (_OVERRIDE_TERMS, _TARGET_TERMS)):
+            add("PI-OVERRIDE-SUSPECTED-001")
+
+        high_rules = {"PI-OVERRIDE-001", "PI-ROLE-001", "PI-EXFIL-001"}
+        status: Literal["clean", "suspected", "blocked"] = "blocked" if any(s["rule_id"] in high_rules for s in signals) else ("suspected" if signals else "clean")
+        return ContentSafetyAssessment(status=status, signals=signals)
+    except Exception as exc:
+        logger.warning("不可信内容注入检测失败，按 suspected 继续: %s", exc)
+        if isinstance(content, str):
+            fallback = content
+        else:
+            try:
+                fallback = json.dumps(content, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                fallback = type(content).__name__
+        return ContentSafetyAssessment(
+            status="suspected",
+            signals=[ContentSafetySignal(rule_id="PI-DETECTOR-ERROR", source=source, content_sha256=hashlib.sha256(fallback.encode("utf-8")).hexdigest())],
+        )
+
+
+def _merge_content_safety(*assessments: ContentSafetyAssessment) -> ContentSafetyAssessment:
+    signals = [signal for assessment in assessments for signal in assessment["signals"]]
+    status: Literal["clean", "suspected", "blocked"]
+    if any(assessment["status"] == "blocked" for assessment in assessments):
+        status = "blocked"
+    elif signals:
+        status = "suspected"
+    else:
+        status = "clean"
+    return ContentSafetyAssessment(status=status, signals=signals)
 
 # 提取可见文本：过滤 script/style/noscript 等不可见节点，
 # 按文档流顺序拼接可见文本节点，交给 Python 侧再做长度截断。
@@ -118,7 +229,7 @@ _EXTRACT_TEXT_JS = r"""
 """
 
 # 提取交互元素：button > a > input > select 的优先级顺序，
-# 只保留 role/name/唯一 selector，selector 优先用 text=，退化到 css nth-of-type。
+# 只保留 role/name/唯一 selector，selector 优先用唯一 text=，退化到完整 CSS 路径。
 _EXTRACT_ELEMENTS_JS = """
 (maxElements) => {
     const isVisible = (el) => {
@@ -134,12 +245,28 @@ _EXTRACT_ELEMENTS_JS = """
 
     const buildSelector = (el) => {
         const tag = el.tagName.toLowerCase();
+        const fullCssPath = () => {
+            const parts = [];
+            let node = el;
+            while (node && node !== document.body) {
+                const nodeTag = node.tagName.toLowerCase();
+                const sameTagSiblings = Array.from(node.parentElement ? node.parentElement.children : [])
+                    .filter((sibling) => sibling.tagName === node.tagName);
+                parts.unshift(`${nodeTag}:nth-of-type(${sameTagSiblings.indexOf(node) + 1})`);
+                node = node.parentElement;
+            }
+            return `css=body > ${parts.join(" > ")}`;
+        };
         // text= 定位只应保留给 button/a 这类靠可见文字辨识的元素；
-        // 表单控件一律优先用 css=#id，其次退化到 nth-of-type。
+        // 文本必须在同标签的可见元素中唯一，否则 Playwright strict mode 会失败。
+        // 表单控件一律优先用 css=#id，其次退化到完整 CSS 路径。
         const isFormControl = tag === "input" || tag === "select" || tag === "textarea";
         if (!isFormControl) {
             const text = (el.innerText || "").trim();
-            if (text && text.length <= 60) {
+            const sameTextVisibleElements = Array.from(document.querySelectorAll(tag)).filter(
+                (candidate) => isVisible(candidate) && (candidate.innerText || "").trim() === text
+            );
+            if (text && text.length <= 60 && sameTextVisibleElements.length === 1) {
                 return `text=${text}`;
             }
         }
@@ -149,11 +276,7 @@ _EXTRACT_ELEMENTS_JS = """
         if (el.name) {
             return `css=${tag}[name='${el.name}']`;
         }
-        const siblings = Array.from(el.parentElement ? el.parentElement.children : []).filter(
-            (n) => n.tagName === el.tagName
-        );
-        const index = siblings.indexOf(el) + 1;
-        return `css=${tag}:nth-of-type(${index})`;
+        return fullCssPath();
     };
 
     const roleFor = (el) => {
@@ -331,6 +454,12 @@ class BrowserStateObserver:
             text_hash=text_hash,
             interactive_elements=interactive_elements,
             screenshot_path=screenshot_path,
+            content_safety=_merge_content_safety(
+                inspect_untrusted_content(title, "page_title"),
+                inspect_untrusted_content(visible_text_summary, "visible_text"),
+                *(inspect_untrusted_content(item["name"], "interactive_element") for item in interactive_elements),
+                *(inspect_untrusted_content(item["href"], "interactive_href") for item in interactive_elements if item.get("href")),
+            ),
         )
 
         if self.vision:

@@ -156,7 +156,7 @@ def test_format_observation_lists_elements_with_selectors():
     obs: ObserveResult = {
         "url": "https://x",
         "title": "Test",
-        "visible_text_summary": "",
+        "visible_text_summary": "页面说明：请选择提交操作。",
         "text_hash": "h1",
         "interactive_elements": [
             {"role": "button", "name": "提交", "selector": "css=#submit", "href": None},
@@ -166,6 +166,8 @@ def test_format_observation_lists_elements_with_selectors():
     formatted = _format_observation(obs)
     assert "css=#submit" in formatted
     assert "提交" in formatted
+    assert "页面说明：请选择提交操作。" in formatted
+    assert '<untrusted_page_content format="json">' in formatted
 
 
 def test_format_observation_handles_no_elements():
@@ -178,4 +180,5 @@ def test_format_observation_handles_no_elements():
         "screenshot_path": "/tmp/step-001.png",
     }
     formatted = _format_observation(obs)
-    assert "未检测到交互元素" in formatted
+    assert '<untrusted_page_content format="json">' in formatted
+    assert '"interactive_elements": []' in formatted

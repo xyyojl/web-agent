@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from agent.types import AgentResult, LLMAction, ObserveResult, ToolResult
+from agent.types import AgentResult, ContentSafetyAssessment, LLMAction, ObserveResult, ToolResult
 
 # [Y3-2] Trace JSONL schema 版本号。v2 新增 observation 嵌套字段、
 # tool_output / tool_output_truncated / tool_output_sha256。
@@ -157,6 +157,7 @@ class TraceLogger:
             "reason": action.get("reason"),
             "screenshot": obs.get("screenshot_path"),
             "duration_ms": duration_ms,
+            "content_safety": obs.get("content_safety", ContentSafetyAssessment(status="clean", signals=[])),
             # --- DS-Y3 新增字段 ---
             "trace_schema_version": _TRACE_SCHEMA_VERSION,
             "observation": {
@@ -177,6 +178,23 @@ class TraceLogger:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+
+    def record_safety_event(self, step: int, obs: ObserveResult, trigger: str, evidence: str) -> None:
+        """记录在 Planner/Selector 调用前被安全阻断的网页内容事件。"""
+        # 此路径的 observation 本身就是命中来源，不能复用原 observation 写入
+        # record()，否则 title/text/element 会把原始注入 payload 写进 trace。
+        safe_obs = ObserveResult(
+            url=obs.get("url", ""),
+            title="",
+            visible_text_summary="",
+            text_hash=obs.get("text_hash", ""),
+            interactive_elements=[],
+            screenshot_path=obs.get("screenshot_path", ""),
+            content_safety=obs.get("content_safety", ContentSafetyAssessment(status="clean", signals=[])),
+        )
+        blocked = ToolResult(success=False, page_changed=False, output=None, error_msg=f"safety_violation: {trigger}")
+        action = LLMAction(action="done", selector=None, text=None, value=None, reason=evidence)
+        self.record(step, safe_obs, "安全策略阻断不可信网页内容", action, blocked)
 
     @staticmethod
     def _process_tool_output(
