@@ -35,6 +35,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          save-cache: false
 
       - name: Set up Python
         run: uv python install 3.11
