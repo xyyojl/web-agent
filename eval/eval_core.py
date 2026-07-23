@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -35,6 +36,7 @@ from agent import (
     Verifier,
     VerifyResult,
 )
+from agent.privacy import redact_data
 
 logger = logging.getLogger(__name__)
 
@@ -201,14 +203,36 @@ def _has_complete_evidence(outcome: CaseOutcome) -> bool:
     if not os.path.isdir(trace_dir):
         return False
     has_trace = os.path.isfile(os.path.join(trace_dir, "trace.jsonl"))
-    has_report = os.path.isfile(os.path.join(trace_dir, "report.json"))
+    report_path = os.path.join(trace_dir, "report.json")
+    has_report = os.path.isfile(report_path)
     has_screenshot = any(f.endswith(".png") for f in os.listdir(trace_dir))
     if not (has_trace and has_report and has_screenshot):
         return False
-    # [Y3-2] 检查 trace 记录是否包含 trace_schema_version >= 2
-    if not outcome.step_records:
+    # v2 不是仅有版本号：每一条记录都必须具备完整观察/执行字段。
+    try:
+        with open(report_path, encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError):
         return False
-    return any(r.get("trace_schema_version", 0) >= 2 for r in outcome.step_records)
+    if report.get("privacy_redaction_version") != 1:
+        return False
+    return _records_have_complete_v2_evidence(outcome.step_records)
+
+
+def _records_have_complete_v2_evidence(records: list[dict]) -> bool:
+    if not records:
+        return False
+    required_observation = {"title", "text_hash", "visible_text_summary", "interactive_elements"}
+    required_execution = {"action", "selector", "reason", "tool_output", "tool_output_truncated", "tool_output_sha256"}
+    for record in records:
+        observation = record.get("observation")
+        if record.get("trace_schema_version") != 2 or record.get("privacy_redaction_version") != 1:
+            return False
+        if not isinstance(observation, dict) or not required_observation.issubset(observation):
+            return False
+        if not required_execution.issubset(record):
+            return False
+    return True
 
 
 def _steps_of(outcome: CaseOutcome) -> int:
@@ -380,9 +404,9 @@ def _build_case_record(outcome: CaseOutcome, suite: str) -> dict:
         "case_id": outcome.case.get("id", "?"),
         "suite": suite,
         "succeeded": outcome.succeeded,
-        "agent_result": outcome.agent_result,
-        "verify_result": outcome.verify_result,
-        "crash_reason": outcome.crash_reason,
+        "agent_result": redact_data(outcome.agent_result),
+        "verify_result": redact_data(outcome.verify_result),
+        "crash_reason": redact_data(outcome.crash_reason),
         "last_screenshot": last_screenshot,
         "trace_dir": outcome.agent_result["trace_dir"] if outcome.agent_result else None,
     }
@@ -535,9 +559,8 @@ def _archive_case_traces(
             f"--archive-case-traces 指定的 case 不存在: {', '.join(missing)}"
         )
 
-    traces_dir = os.path.join(artifact_dir, "traces")
-    os.makedirs(traces_dir, exist_ok=True)
-
+    # 在复制前完成全部输入的 schema / 隐私契约预检，避免把不可信 trace
+    # 混入 artifact；_has_complete_evidence 同时检查 v2 必填字段和脱敏版本。
     for case_id in archive_case_ids:
         outcome = id_to_outcome[case_id]
         if outcome.agent_result is None:
@@ -550,6 +573,20 @@ def _archive_case_traces(
             raise ArtifactError(
                 f"--archive-case-traces 指定的 case {case_id} 的 trace 目录不存在: {trace_dir}"
             )
+        disk_records = _load_step_records(trace_dir)
+        disk_outcome = CaseOutcome(case=outcome.case, agent_result=outcome.agent_result, step_records=disk_records)
+        if not _has_complete_evidence(disk_outcome):
+            raise ArtifactError(
+                f"--archive-case-traces 指定的 case {case_id} 的 trace 未通过 v2 完整性/隐私契约预检"
+            )
+
+    traces_dir = os.path.join(artifact_dir, "traces")
+    os.makedirs(traces_dir, exist_ok=True)
+
+    for case_id in archive_case_ids:
+        outcome = id_to_outcome[case_id]
+        assert outcome.agent_result is not None
+        trace_dir = outcome.agent_result["trace_dir"]
 
         # 复制 trace.jsonl、report.json 和截图
         dest_dir = os.path.join(traces_dir, case_id)
@@ -607,37 +644,80 @@ def write_artifact(
     # 获取 git 信息 [R3-2]
     git_commit, git_dirty = _get_git_info()
 
-    # 构建并写入各文件
-    os.makedirs(artifact_dir, exist_ok=True)
+    # 先预检归档输入；这一步不得创建最终 artifact 目录。
+    if archive_case_ids:
+        _archive_case_traces_preflight(all_outcomes, archive_case_ids)
 
+    # 在同一父目录的临时目录完成全部写入，成功后一次发布。任何异常都会
+    # 清理临时目录，最终目录不会留下可被误认为有效证据的半成品。
+    parent_dir = os.path.dirname(artifact_dir)
+    os.makedirs(parent_dir, exist_ok=True)
+    staging_dir = tempfile.mkdtemp(prefix=".artifact-staging-", dir=parent_dir)
     try:
         # provenance.json
         provenance = build_provenance(
             config, suite_arg, case_arg, case_ids, git_commit, git_dirty,
         )
-        provenance_path = os.path.join(artifact_dir, "provenance.json")
+        provenance_path = os.path.join(staging_dir, "provenance.json")
         with open(provenance_path, "w", encoding="utf-8") as f:
             json.dump(provenance, f, ensure_ascii=False, indent=2)
 
         # results.json
         results = build_results_json(all_outcomes)
-        results_path = os.path.join(artifact_dir, "results.json")
+        results_path = os.path.join(staging_dir, "results.json")
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
 
         # summary.md
         summary_md = render_artifact_summary(suite_metrics, all_outcomes, provenance)
-        summary_path = os.path.join(artifact_dir, "summary.md")
+        summary_path = os.path.join(staging_dir, "summary.md")
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write(summary_md)
 
         # trace 归档
         if archive_case_ids:
-            _archive_case_traces(artifact_dir, all_outcomes, archive_case_ids)
+            _archive_case_traces(staging_dir, all_outcomes, archive_case_ids)
+
+        # 仅 .gitkeep 的预建目录允许被发布目录替换。
+        if os.path.isdir(artifact_dir):
+            gitkeep = os.path.join(artifact_dir, ".gitkeep")
+            if os.path.isfile(gitkeep):
+                os.unlink(gitkeep)
+            os.rmdir(artifact_dir)
+        os.replace(staging_dir, artifact_dir)
 
         logger.info("artifact 已生成: %s", artifact_dir)
 
     except ArtifactError:
+        shutil.rmtree(staging_dir, ignore_errors=True)
         raise
     except Exception as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
         raise ArtifactError(f"写 artifact 失败: {exc}") from exc
+
+
+def _archive_case_traces_preflight(
+    all_outcomes: dict[str, list[CaseOutcome]], archive_case_ids: list[str]
+) -> None:
+    """在写任何 artifact 文件前验证所有待归档 trace。"""
+    # 复用复制函数的校验路径，但不让它触碰最终目录；空临时目录只用于调用
+    # 前的防御性检查不会满足“写最终文件”的条件。
+    id_to_outcome = {
+        outcome.case.get("id", "?"): outcome
+        for suite in ("local", "public")
+        for outcome in all_outcomes.get(suite, [])
+    }
+    missing = [case_id for case_id in archive_case_ids if case_id not in id_to_outcome]
+    if missing:
+        raise ArtifactError(f"--archive-case-traces 指定的 case 不存在: {', '.join(missing)}")
+    for case_id in archive_case_ids:
+        outcome = id_to_outcome[case_id]
+        if outcome.agent_result is None:
+            raise ArtifactError(f"--archive-case-traces 指定的 case {case_id} 没有产生 agent_result，无法归档 trace")
+        trace_dir = outcome.agent_result["trace_dir"]
+        if not trace_dir or not os.path.isdir(trace_dir):
+            raise ArtifactError(f"--archive-case-traces 指定的 case {case_id} 的 trace 目录不存在: {trace_dir}")
+        disk_records = _load_step_records(trace_dir)
+        disk_outcome = CaseOutcome(case=outcome.case, agent_result=outcome.agent_result, step_records=disk_records)
+        if not _has_complete_evidence(disk_outcome):
+            raise ArtifactError(f"--archive-case-traces 指定的 case {case_id} 的 trace 未通过 v2 完整性/隐私契约预检")

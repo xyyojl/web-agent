@@ -69,7 +69,12 @@ def _make_outcome(
             "confidence": 1.0,
         }
         outcome.verify_result = verify_result
-    outcome.step_records = [{"success": True, "trace_schema_version": 2}]
+    outcome.step_records = [{
+        "success": True, "trace_schema_version": 2, "privacy_redaction_version": 1,
+        "action": "click", "selector": "css=#ok", "reason": "ok",
+        "tool_output": None, "tool_output_truncated": False, "tool_output_sha256": None,
+        "observation": {"title": "T", "text_hash": "h", "visible_text_summary": "text", "interactive_elements": []},
+    }]
     return outcome
 
 
@@ -109,16 +114,16 @@ async def test_trace_archived_with_mock(tmp_path):
     # 创建 fake trace 目录
     trace_dir = str(tmp_path / "fake-trace")
     os.makedirs(trace_dir)
+    mock_outcome = _make_outcome(trace_dir=trace_dir)
     with open(os.path.join(trace_dir, "trace.jsonl"), "w", encoding="utf-8") as f:
-        f.write('{"step": 0}\n')
+        f.write(json.dumps(mock_outcome.step_records[0]) + "\n")
     with open(os.path.join(trace_dir, "report.json"), "w", encoding="utf-8") as f:
-        json.dump({"success": True}, f)
+        json.dump({"success": True, "privacy_redaction_version": 1}, f)
     with open(os.path.join(trace_dir, "step-001.png"), "wb") as f:
         f.write(b"fake png")
 
     artifact_dir = str(tmp_path / "artifact-traces")
 
-    mock_outcome = _make_outcome(trace_dir=trace_dir)
     with patch("eval.run_eval.run_one_case", new_callable=AsyncMock, return_value=mock_outcome):
         with patch("eval.run_eval._SUMMARY_PATH", str(tmp_path / "eval_summary.md")):
             await run_eval.main_async(

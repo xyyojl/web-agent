@@ -268,6 +268,29 @@ def test_record_type_action_text_not_in_trace(tmp_path):
     assert "text" not in row  # no top-level text field
 
 
+def test_type_secret_is_redacted_from_plan_reason_and_report(tmp_path):
+    """持久化边界不能只省略 action.text：LLM 回显也必须被清洗。"""
+    tracer = _make_tracer(tmp_path)
+    secret = "super-secret-password-123"
+    obs: ObserveResult = {
+        "url": "https://x", "title": "T", "visible_text_summary": "",
+        "text_hash": "h", "interactive_elements": [], "screenshot_path": "/tmp/s.png",
+    }
+    action: LLMAction = {"action": "type", "selector": "css=#password", "text": secret,
+                         "value": None, "reason": f"输入 {secret}"}
+    result: ToolResult = {"success": False, "page_changed": False, "output": None, "error_msg": None}
+    tracer.record(0, obs, f"将密码设置为 {secret}", action, result)
+    report_result: AgentResult = {
+        "task_id": "L11", "task": f"将密码修改为 {secret}", "url": "https://x",
+        "success": False, "output": None, "steps": 1, "duration_s": 1.0,
+        "fail_reason": f"safety_violation: {secret}", "trace_dir": tracer.run_dir, "last_screenshot": None,
+    }
+    tracer.write_report(report_result["task"], report_result)
+    persisted = open(tracer.trace_path, encoding="utf-8").read() + open(tracer.report_path, encoding="utf-8").read()
+    assert secret not in persisted
+    assert "[REDACTED:browser_type_input]" in persisted
+
+
 def test_write_report_contains_expected_fields(tmp_path):
     tracer = _make_tracer(tmp_path)
     # 分配一张截图，模拟主循环 observe() 至少跑过一步，验证

@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 
 from agent.types import AgentResult, ContentSafetyAssessment, LLMAction, ObserveResult, ToolResult
+from agent.privacy import redact_data, redact_text
 
 # [Y3-2] Trace JSONL schema 版本号。v2 新增 observation 嵌套字段、
 # tool_output / tool_output_truncated / tool_output_sha256。
@@ -21,6 +22,7 @@ _TRACE_SCHEMA_VERSION = 2
 
 # tool_output 单条最大字符数，超过时截断并记录完整内容的 sha256 摘要。
 _TOOL_OUTPUT_MAX_CHARS = 10_000
+_PRIVACY_REDACTION_VERSION = 1
 
 
 class TraceLogger:
@@ -48,6 +50,8 @@ class TraceLogger:
         # reset_step_timer()，第一步的 duration_ms 会从这一刻（TraceLogger
         # 构造时刻）算起，包含构造之后到第一次 record() 之间的全部耗时。
         self._last_time = time.monotonic()
+        # 仅保存在内存中；用于把 LLM 在 plan/reason 等字段里复述的 type 输入替换掉。
+        self._sensitive_values: set[str] = set()
 
     def reset_step_timer(self) -> None:
         """把 duration_ms 的计时基准重置为当前时刻。
@@ -73,6 +77,14 @@ class TraceLogger:
     def last_screenshot_path(self) -> str | None:
         """整个 run 目前为止分配出去的最后一张截图路径；一张都还没有时为 None。"""
         return self._last_screenshot_path
+
+    def register_sensitive_value(self, value: str | None) -> None:
+        """登记 browser_type 输入，仅用于随后所有持久化字段的脱敏。"""
+        if value:
+            self._sensitive_values.add(value)
+
+    def redact_for_persistence(self, value: str | None) -> str | None:
+        return self._redact(value)
 
     @staticmethod
     def _parse_selector_level(selector: str | None) -> str | None:
@@ -133,6 +145,8 @@ class TraceLogger:
         - 不记录 browser_type() 的输入文本值（action["text"] 不写入 trace）
         - 不记录 .env、认证 token、cookie、Authorization header
         """
+        if action.get("action") == "type":
+            self.register_sensitive_value(action.get("text"))
         now = time.monotonic()
         duration_ms = int((now - self._last_time) * 1000)
         self._last_time = now
@@ -147,19 +161,20 @@ class TraceLogger:
             "step": step,
             "timestamp": self._now_iso(),
             "url": obs.get("url"),
-            "plan": plan,
+            "plan": self._redact(plan),
             "action": action.get("action"),
             "selector": action.get("selector"),
             "selector_level": self._resolve_selector_level(action, result),
             "success": result.get("success"),
             "page_changed": result.get("page_changed"),
-            "error_msg": result.get("error_msg"),
-            "reason": action.get("reason"),
+            "error_msg": self._redact(result.get("error_msg")),
+            "reason": self._redact(action.get("reason")),
             "screenshot": obs.get("screenshot_path"),
             "duration_ms": duration_ms,
             "content_safety": obs.get("content_safety", ContentSafetyAssessment(status="clean", signals=[])),
             # --- DS-Y3 新增字段 ---
             "trace_schema_version": _TRACE_SCHEMA_VERSION,
+            "privacy_redaction_version": _PRIVACY_REDACTION_VERSION,
             "observation": {
                 "title": obs.get("title"),
                 "text_hash": obs.get("text_hash"),
@@ -196,8 +211,8 @@ class TraceLogger:
         action = LLMAction(action="done", selector=None, text=None, value=None, reason=evidence)
         self.record(step, safe_obs, "安全策略阻断不可信网页内容", action, blocked)
 
-    @staticmethod
     def _process_tool_output(
+        self,
         output: str | dict | list | None,
     ) -> tuple[str | None, bool, str | None]:
         """处理 ToolResult.output，返回 (tool_output, truncated, sha256) 三元组。
@@ -216,12 +231,16 @@ class TraceLogger:
         else:
             output_str = str(output)
 
+        output_str = redact_text(output_str, self._sensitive_values) or ""
         if len(output_str) <= _TOOL_OUTPUT_MAX_CHARS:
             return output_str, False, None
 
         full_hash = hashlib.sha256(output_str.encode("utf-8")).hexdigest()
         truncated = output_str[:_TOOL_OUTPUT_MAX_CHARS]
         return truncated, True, full_hash
+
+    def _redact(self, value: str | None) -> str | None:
+        return redact_text(value, self._sensitive_values)
 
     def write_report(self, task: str, result: AgentResult) -> None:
         """写入本次 run 的汇总报告 report.json。
@@ -235,15 +254,16 @@ class TraceLogger:
         report = {
             "run_id": self.run_id,
             "task_id": result.get("task_id"),
-            "task": task,
+            "task": self._redact(task),
             "url": result.get("url"),
             "success": result.get("success"),
-            "output": result.get("output"),
+            "output": redact_data(result.get("output"), self._sensitive_values),
             "steps": result.get("steps"),
             "duration_s": result.get("duration_s"),
-            "fail_reason": result.get("fail_reason"),
+            "fail_reason": self._redact(result.get("fail_reason")),
             "trace_file": self.trace_path,
             "last_screenshot": result.get("last_screenshot"),
+            "privacy_redaction_version": _PRIVACY_REDACTION_VERSION,
         }
         with open(self.report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)

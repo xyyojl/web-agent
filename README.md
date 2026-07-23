@@ -65,7 +65,7 @@ L6 评测层
 *   **L2 推理层 · WebPlanner**：分析任务目标与当前页面状态，输出自然语言行动计划（`plan: str`），说明意图但不指定 selector。
 *   **L3 决策层 · ActionSelector**：基于 Planner 的计划做 Tool Calling，输出严格格式的结构化动作 `LLMAction`（action/selector/text/value/reason）。与 L2 拆为两次独立 LLM 调用，职责分离（推理需宽松格式、决策需严格 JSON，合并会互相干扰）。
 *   **L4 执行层 · PlaywrightExecutor + BrowserTools**：将 LLMAction 翻译为 Playwright 底层浏览器操作，三级 selector 降级（CSS → get_by_text → get_by_role），返回 `ToolResult`。
-*   **L5 记录层 · TraceLogger**：每步强制写入 `trace.jsonl`（含 Step / URL / observation 证据 / Action / tool_output / Reason / ToolResult）+ 截图 `step-N.png`，失败步骤尤其详尽，确保执行轨迹 100% 可复现可审计。trace_schema_version=2。
+*   **L5 记录层 · TraceLogger**：每步写入经脱敏的 `trace.jsonl`（含 Step / URL / observation 证据 / Action / tool_output / Reason / ToolResult）+ 截图 `step-N.png`。它支持证据复盘，但受输入值脱敏和第三方页面数据边界限制，并非“100% 原样审计”。trace_schema_version=2。
 *   **L6 评测层 · Verifier**：独立于主循环，对任务结果做评测。支持 exact / contains / json_schema / llm_judge / safety_block 五种模式按 case 指定，输出 `VerifyResult` 并汇总为 `eval_summary.md`。
 
 ### 2. 关键设计决策
@@ -198,18 +198,9 @@ uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
 - `provenance.json`：运行参数、模型信息、git commit 等溯源信息
 - `traces/<case_id>/`：归档的 trace 文件（仅 `--archive-case-traces` 指定的代表 case）
 
-最新一次全量运行（`--suite all`）的 artifact：
+当前没有可引用的“最新可信” artifact：此前的 `2026-07-21-local-public` 与 `ablation-20260721` 包含敏感测试输入，已从当前工作树移除且不再作为基准。修复后的代码通过 L11 自动 eval 后，必须重新运行生成替代 artifact；不会通过手改旧结果掩盖泄露。
 
-- **artifact 目录**：[eval/artifacts/2026-07-21-local-public/](eval/artifacts/2026-07-21-local-public)
-- **汇总报告**：[summary.md](eval/artifacts/2026-07-21-local-public/summary.md)（`generated_at` 见文件顶部）
-- **结构化结果**：[results.json](eval/artifacts/2026-07-21-local-public/results.json)
-- **溯源信息**：[provenance.json](eval/artifacts/2026-07-21-local-public/provenance.json)
-
-> ⚠️ **基准有效性**：public suite 结果基于外部网站在 `generated_at` 时刻的实际内容，网站变化后该 artifact 不再代表当前行为，请以最新 artifact 为准。
-
-运行过程中的 `trace.jsonl`、`report.json` 以及每一步的视觉快照都将被安全持久化在 `traces/run-<timestamp>/` 下，确保执行轨迹 100% 可复现、可审计。
-
-> 💡 **消融实验**：在本地 10 项任务上对照 DOM-only vs DOM+Vision 两组（每组运行 3 次，共 60 次运行），任务成功率打平（30/30），平均步数从 2.53 降至 2.17（以 DOM-only 为基准，相对降幅约 14.5%），差异稳定出现在需要确认页面状态变化的任务（标签页导航、表单填写）上，说明视觉信号主要提升的是多模态 Agent 的**执行效率**而非**准确率**。完整报告含逐 case 步数对比与分析：[ablation_report.md](eval/ablation_report.md)，可复核 artifact：[eval/artifacts/ablation-20260721/](eval/artifacts/ablation-20260721)
+运行过程中的 `trace.jsonl`、`report.json` 以及视觉快照会落在 `traces/run-<timestamp>/` 下。持久化层会清除 `browser_type` 输入值及其在 task/plan/reason 等字段的回显；这保留必要的操作和页面证据，但不保留原始敏感输入。
 
 #### 运行消融实验
 
@@ -249,6 +240,7 @@ uv run python eval/run_ablation.py --suite local \
 
 **安全约束**：
 - `browser_type()` 的输入文本值（如密码）**不会**写入 trace。
+- 同一输入值即使被 LLM 复述到 task、plan、reason、tool_output、错误信息或 report，也会被替换为受控的 `[REDACTED:browser_type_input]` 标记。
 - `.env`、认证 token、cookie、Authorization header 不会写入 trace。
 - 截图始终是**观察前**快照，不是动作后截图。
 
@@ -270,6 +262,8 @@ uv run python eval/run_ablation.py --suite local \
 - 失败时使用有界退避重试（`browser_open` 的 `open_retry`，默认 2 次重试），不无限重试。
 
 归档到 Git 的截图/文本仅用于内部工程可复核目的。若目标站点存在明确的 robots/ToS 限制自动化抓取或存档，对应 case 应改为不归档 trace（仅保留 pass/fail 摘要），由实现者在归档前逐 case 确认。
+
+归档前会校验 trace 的 v2 必填证据字段与 `privacy_redaction_version`；校验失败不会发布 artifact。artifact 采用临时目录完成写入后再发布，失败不会留下可被误认为有效证据的半成品目录。
 
 ---
 

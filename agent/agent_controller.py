@@ -213,7 +213,7 @@ class AgentController:
                 # 穿透到最外层 finally——否则 _finalize() 不会被执行，
                 # report.json 不会生成。这里捕获后走和主循环内安全拦截一致
                 # 的收尾路径：构造失败 AgentResult 并落盘 report。
-                logger.warning("任务在打开页面阶段命中安全拦截，终止: %s", exc)
+                logger.warning("任务在打开页面阶段命中安全拦截，终止")
                 return self._finalize(
                     task=task,
                     success=False,
@@ -242,7 +242,7 @@ class AgentController:
                         step, task, history, extract_cache
                     )
                 except SafetyError as exc:
-                    logger.warning("任务在第 %d 步命中安全拦截，终止: %s", step, exc)
+                    logger.warning("任务在第 %d 步命中安全拦截，终止", step)
                     return self._finalize(
                         task=task,
                         success=False,
@@ -260,7 +260,7 @@ class AgentController:
                         fail_reason=f"llm_error: {exc.message}",
                     )
                 except Exception as exc:  # 编排层最后一道兜底，绝不能崩溃
-                    logger.warning("任务在第 %d 步发生未预期异常，终止: %s", step, exc)
+                    logger.warning("任务在第 %d 步发生未预期异常，终止（异常详情不写入日志）", step)
                     return self._finalize(
                         task=task,
                         success=False,
@@ -423,6 +423,9 @@ class AgentController:
                 )
                 return obs, plan, forced_done, forced_result, extract_cache, content_safety
 
+        if action["action"] == "type":
+            # 在工具调用前登记，保证 SafetyError 路径的 report/trace 同样能清洗回显。
+            self.tracer.register_sensitive_value(action.get("text"))
         try:
             result = await self.executor.execute(action, obs=obs)
         except SafetyError as exc:
@@ -564,7 +567,7 @@ class AgentController:
         """
         result = AgentResult(
             task_id=self._task_id,
-            task=task,
+            task=self.tracer.redact_for_persistence(task) or "",
             url=self._url,
             success=success,
             output=output,

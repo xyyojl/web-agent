@@ -77,6 +77,16 @@ def _outcome(*, case=None, agent_result=None, verify_success=True, steps_records
     return outcome
 
 
+def _complete_v2_record():
+    return {
+        "trace_schema_version": 2, "privacy_redaction_version": 1,
+        "action": "click", "selector": "css=#ok", "reason": "submit",
+        "tool_output": None, "tool_output_truncated": False, "tool_output_sha256": None,
+        "observation": {"title": "T", "text_hash": "h", "visible_text_summary": "text", "interactive_elements": []},
+        "success": True,
+    }
+
+
 # ---------- load_cases ----------
 
 def test_load_cases_missing_directory_returns_empty(tmp_path):
@@ -210,12 +220,12 @@ def test_has_complete_evidence_true_when_all_files_present(tmp_path):
     trace_dir = tmp_path / "run-1"
     trace_dir.mkdir()
     (trace_dir / "trace.jsonl").write_text("{}", encoding="utf-8")
-    (trace_dir / "report.json").write_text("{}", encoding="utf-8")
+    (trace_dir / "report.json").write_text('{"privacy_redaction_version": 1}', encoding="utf-8")
     (trace_dir / "step-001.png").write_bytes(b"fake")
 
     outcome = _outcome(
         agent_result=_agent_result(trace_dir=str(trace_dir)),
-        steps_records=[{"trace_schema_version": 2, "success": True}],
+        steps_records=[_complete_v2_record()],
     )
     assert _has_complete_evidence(outcome) is True
 
@@ -225,13 +235,24 @@ def test_has_complete_evidence_false_when_old_trace_format(tmp_path):
     trace_dir = tmp_path / "run-old"
     trace_dir.mkdir()
     (trace_dir / "trace.jsonl").write_text("{}", encoding="utf-8")
-    (trace_dir / "report.json").write_text("{}", encoding="utf-8")
+    (trace_dir / "report.json").write_text('{"privacy_redaction_version": 1}', encoding="utf-8")
     (trace_dir / "step-001.png").write_bytes(b"fake")
 
     outcome = _outcome(
         agent_result=_agent_result(trace_dir=str(trace_dir)),
         steps_records=[{"success": True}],  # no trace_schema_version
     )
+    assert _has_complete_evidence(outcome) is False
+
+
+def test_has_complete_evidence_false_for_v2_missing_required_fields(tmp_path):
+    trace_dir = tmp_path / "run-incomplete-v2"
+    trace_dir.mkdir()
+    (trace_dir / "trace.jsonl").write_text("{}", encoding="utf-8")
+    (trace_dir / "report.json").write_text('{"privacy_redaction_version": 1}', encoding="utf-8")
+    (trace_dir / "step-001.png").write_bytes(b"fake")
+    fake_v2 = {"trace_schema_version": 2, "privacy_redaction_version": 1, "observation": {"title": "T"}}
+    outcome = _outcome(agent_result=_agent_result(trace_dir=str(trace_dir)), steps_records=[fake_v2])
     assert _has_complete_evidence(outcome) is False
 
 
@@ -344,6 +365,13 @@ def test_build_results_json_case_count_matches_outcomes():
     assert len(results["cases"]) == 3
     assert results["cases"][0]["suite"] == "local"
     assert results["cases"][2]["suite"] == "public"
+
+
+def test_build_results_json_redacts_sensitive_task_values():
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+    outcome = _outcome(agent_result=_agent_result(task=f"将密码修改为 {secret}"))
+    results = build_results_json({"local": [outcome]})
+    assert secret not in json.dumps(results, ensure_ascii=False)
 
 
 def test_build_provenance_contains_all_required_fields():
@@ -461,15 +489,15 @@ def test_write_artifact_archive_traces_copies_files(tmp_path):
     trace_dir = str(tmp_path / "fake-trace")
     os.makedirs(trace_dir)
     with open(os.path.join(trace_dir, "trace.jsonl"), "w", encoding="utf-8") as f:
-        f.write('{"step": 0}\n')
+        f.write(json.dumps(_complete_v2_record()) + "\n")
     with open(os.path.join(trace_dir, "report.json"), "w", encoding="utf-8") as f:
-        json.dump({"success": True}, f)
+        json.dump({"success": True, "privacy_redaction_version": 1}, f)
     with open(os.path.join(trace_dir, "step-001.png"), "wb") as f:
         f.write(b"fake png")
 
     artifact_dir = str(tmp_path / "artifact-with-traces")
     config = AgentConfig()
-    outcome = _outcome(agent_result=_agent_result(trace_dir=trace_dir))
+    outcome = _outcome(agent_result=_agent_result(trace_dir=trace_dir), steps_records=[_complete_v2_record()])
     all_outcomes = {"local": [outcome]}
     suite_metrics = {"local": compute_metrics([outcome])}
 
@@ -504,6 +532,21 @@ def test_write_artifact_archive_trace_dir_missing_fails(tmp_path):
 
     with pytest.raises(ArtifactError, match="trace 目录不存在"):
         write_artifact(artifact_dir, all_outcomes, suite_metrics, config, "local", None, ["L01"])
+    assert not os.path.exists(artifact_dir)
+
+
+def test_write_artifact_archive_preflight_failure_leaves_no_artifact(tmp_path):
+    """归档 trace 伪装为 v2 但缺字段时，最终目录不能留下半成品。"""
+    trace_dir = tmp_path / "bad-trace"
+    trace_dir.mkdir()
+    (trace_dir / "trace.jsonl").write_text('{"trace_schema_version": 2}\n', encoding="utf-8")
+    (trace_dir / "report.json").write_text('{"privacy_redaction_version": 1}', encoding="utf-8")
+    (trace_dir / "step-001.png").write_bytes(b"fake")
+    outcome = _outcome(agent_result=_agent_result(trace_dir=str(trace_dir)), steps_records=[{"trace_schema_version": 2}])
+    artifact_dir = str(tmp_path / "must-not-exist")
+    with pytest.raises(ArtifactError, match="完整性/隐私契约"):
+        write_artifact(artifact_dir, {"local": [outcome]}, {"local": compute_metrics([outcome])}, AgentConfig(), "local", None, ["L01"])
+    assert not os.path.exists(artifact_dir)
 
 
 def test_write_artifact_crash_reason_recorded(tmp_path):
