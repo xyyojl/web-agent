@@ -224,6 +224,8 @@ uv run python eval/run_ablation.py --suite local \
 >
 > **模型快照说明**：`model` 字段记录的是供应商别名，供应商可能对别名指向的底层模型做未公示更新，历史 artifact 的可复现性受此限制（详见 artifact 中的 `model_pinning_caveat` 字段）。
 
+💡 消融实验：在本地 10 项任务上对照 DOM-only vs DOM+Vision 两组（每组运行 3 次，共 60 次运行），DOM+Vision 的 artifact 验证成功率为 30/30，DOM-only 为 29/30；平均步数从 2.27 降至 2.17（以 DOM-only 为基准，相对降幅约 4.4%）。唯一成功率差异出现在 L09 第 3 轮，原始记录显示为 DOM-only 的 LLM Judge 输出格式失败，因此不宜直接归因于 Vision 的准确率提升；本轮证据仍主要支持 Vision 带来小幅执行效率改善。完整报告含逐 case 步数对比与分析：[ablation_report.md](eval/ablation_report.md)，可复核 artifact：[eval/artifacts/ablation-20260723/](eval/artifacts/ablation-20260723)
+
 ### Trace 格式说明（trace_schema_version=2）
 
 每步以一行 JSON 追加写入 `trace.jsonl`，包含以下字段：

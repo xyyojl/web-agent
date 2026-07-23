@@ -54,6 +54,7 @@ from agent.prompts import (
     EXTRACTOR_SYSTEM,
     JUDGE_SYSTEM,
 )
+from agent.privacy import redact_data
 
 logger = logging.getLogger(__name__)
 
@@ -340,25 +341,43 @@ def _print_table(dom_summary: dict, vision_summary: dict) -> None:
     print("\n".join(lines))
 
 
-def _print_divergence(dom_summary: dict, vision_summary: dict) -> None:
-    """逐 case 标出两组结果不一致的地方，这是消融实验最直接想看的信息，
-    附在 Markdown 表格之后打印，不混进表格本身（不影响表格被直接复制使用）。
+def _find_divergences(dom_summary: dict, vision_summary: dict) -> list[tuple[str, int, bool, bool]]:
+    """返回两组同一 case、同一轮次中 success 不一致的结果。
+
+    多轮实验的 runs[] 保留了每一次原始结果，不能只比较第 1 轮；否则第 2
+    轮及之后的真实差异会被汇总报告错误地隐藏。
     """
     dom_by_id = {c["case_id"]: c for c in dom_summary["cases"]}
     vision_by_id = {c["case_id"]: c for c in vision_summary["cases"]}
-    diverged = [
-        case_id
-        for case_id in dom_by_id
-        if case_id in vision_by_id and dom_by_id[case_id]["runs"][0]["success"] != vision_by_id[case_id]["runs"][0]["success"]
-    ]
+    diverged: list[tuple[str, int, bool, bool]] = []
+    for case_id, dom_case in dom_by_id.items():
+        if case_id not in vision_by_id:
+            continue
+        vision_case = vision_by_id[case_id]
+        for run_idx, (dom_run, vision_run) in enumerate(
+            zip(dom_case["runs"], vision_case["runs"])
+        ):
+            if dom_run["success"] != vision_run["success"]:
+                diverged.append(
+                    (case_id, run_idx, dom_run["success"], vision_run["success"])
+                )
+    return diverged
+
+
+def _print_divergence(dom_summary: dict, vision_summary: dict) -> None:
+    """逐轮标出两组结果不一致的地方，附在 Markdown 表格之后打印。"""
+    diverged = _find_divergences(dom_summary, vision_summary)
 
     lines = [""]
     if diverged:
         lines.append("两组结果不一致的 case：")
-        for case_id in diverged:
-            dom_ok = "PASS" if dom_by_id[case_id]["runs"][0]["success"] else "FAIL"
-            vision_ok = "PASS" if vision_by_id[case_id]["runs"][0]["success"] else "FAIL"
-            lines.append(f"  {case_id}: DOM-only={dom_ok}  DOM+Vision={vision_ok}")
+        for case_id, run_idx, dom_success, vision_success in diverged:
+            dom_ok = "PASS" if dom_success else "FAIL"
+            vision_ok = "PASS" if vision_success else "FAIL"
+            lines.append(
+                f"  {case_id}（第 {run_idx + 1} 轮）: "
+                f"DOM-only={dom_ok}  DOM+Vision={vision_ok}"
+            )
     else:
         lines.append("两组结果没有出现分歧的 case。")
     print("\n".join(lines))
@@ -563,16 +582,15 @@ def render_ablation_summary(
     # 分歧 case
     lines.append("")
     lines.append("## 分歧 case")
-    diverged = [
-        cid for cid in dom_by_id
-        if cid in vis_by_id
-        and dom_by_id[cid]["runs"][0]["success"] != vis_by_id[cid]["runs"][0]["success"]
-    ]
+    diverged = _find_divergences(dom_summary, vision_summary)
     if diverged:
-        for cid in diverged:
-            dom_ok = "PASS" if dom_by_id[cid]["runs"][0]["success"] else "FAIL"
-            vis_ok = "PASS" if vis_by_id[cid]["runs"][0]["success"] else "FAIL"
-            lines.append(f"- `{cid}`: DOM-only={dom_ok}  DOM+Vision={vis_ok}")
+        for cid, run_idx, dom_success, vis_success in diverged:
+            dom_ok = "PASS" if dom_success else "FAIL"
+            vis_ok = "PASS" if vis_success else "FAIL"
+            lines.append(
+                f"- `{cid}`（第 {run_idx + 1} 轮）: "
+                f"DOM-only={dom_ok}  DOM+Vision={vis_ok}"
+            )
     else:
         lines.append("两组结果没有出现分歧的 case。")
 
@@ -729,6 +747,9 @@ async def main_async(
         "output_tokens": None,
         "groups": summaries,
     }
+    # 消融 artifact 同样是持久化边界：case.task、判题理由等字段可能回显
+    # browser_type 的敏感输入，写入本地结果或可提交 artifact 前统一脱敏。
+    result_payload = redact_data(result_payload)
 
     # 默认仍写本地忽略的 ablation_results.json
     os.makedirs(os.path.dirname(_RESULTS_PATH), exist_ok=True)

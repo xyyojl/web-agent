@@ -427,3 +427,57 @@ def test_prompt_fingerprint_changes_with_params():
     modified["planner"]["max_tokens"] = 999
     fp2 = run_ablation._compute_prompt_fingerprint(modified)
     assert fp1 != fp2
+
+
+def test_divergence_in_later_run_is_reported():
+    """多轮实验不能只比较 runs[0]，否则后续轮次的分歧会被遗漏。"""
+    dom_summary = {
+        "cases": [{"case_id": "L09", "runs": [
+            {"success": True}, {"success": True}, {"success": False},
+        ]}],
+    }
+    vision_summary = {
+        "cases": [{"case_id": "L09", "runs": [
+            {"success": True}, {"success": True}, {"success": True},
+        ]}],
+    }
+
+    divergences = run_ablation._find_divergences(dom_summary, vision_summary)
+
+    assert divergences == [("L09", 2, False, True)]
+
+
+def test_divergence_skips_case_missing_from_other_group():
+    """缺少配对 case 时应跳过，不应访问空的 vision case。"""
+    dom_summary = {"cases": [{"case_id": "L09", "runs": [{"success": False}]}]}
+    vision_summary = {"cases": []}
+
+    assert run_ablation._find_divergences(dom_summary, vision_summary) == []
+
+
+async def test_ablation_results_redact_sensitive_task_value(tmp_path):
+    """消融结果写盘前必须清除 case.task 中的 browser_type 输入值。"""
+    artifact_dir = str(tmp_path / "ablation-redaction")
+    results_path = str(tmp_path / "ablation_results.json")
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+
+    async def _mock(case, _config):
+        outcome = _make_outcome(case_id=case["id"])
+        if case["id"] == "L11":
+            outcome.case["task"] = f"将登录密码修改为 {secret}，然后保存"
+        return outcome
+
+    with patch("eval.run_ablation.run_one_case", new_callable=AsyncMock, side_effect=_mock):
+        with patch("eval.run_ablation._RESULTS_PATH", results_path):
+            await run_ablation.main_async(
+                suite_arg="local",
+                case_arg="L11",
+                artifact_dir=artifact_dir,
+                run_count=1,
+                exclude_from_avg=[],
+            )
+
+    for path in (results_path, os.path.join(artifact_dir, "ablation_results.json")):
+        text = open(path, encoding="utf-8").read()
+        assert secret not in text
+        assert "[REDACTED:browser_type_input]" in text
