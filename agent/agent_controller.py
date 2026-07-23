@@ -83,6 +83,8 @@ def _summarize_result(action: LLMAction, result: ToolResult) -> str:
 # 剥离规则的正确性依赖于"注入规则我们自己完全掌控"这个前提，不是
 # 泛化的 Markdown 清洗。
 _STRUCTURAL_PREFIX_RE = re.compile(r"^(?:#{1,6}\s+|-\s+|\[按钮]\s*)")
+_STRICT_RAW_OUTPUT_RE = re.compile(r"原样返回|只输出|只含|仅返回|only\s+return", re.IGNORECASE)
+_HINT_LINE_RE = re.compile(r"^\[提示]\s*(.+?)\s*$", re.MULTILINE)
 
 
 def _strip_structural_prefix(text: str) -> str:
@@ -144,6 +146,28 @@ def _unwrap_extract_data(output: str | None) -> object | None:
     if not isinstance(parsed, dict) or "data" not in parsed:
         return None
     return parsed["data"]
+
+
+def _strict_scalar_extract_output(task: str, data: object) -> str | None:
+    """严格原样输出任务只在 extract data 唯一标量时确定性解包。
+
+    这避免重复 extract 缓存收尾把 {"install_command": "..."} 重新编码为
+    JSON，而不为多字段/结构化任务猜测输出格式。
+    """
+    if not _STRICT_RAW_OUTPUT_RE.search(task):
+        return None
+    if not isinstance(data, dict) or len(data) != 1:
+        return None
+    value = next(iter(data.values()))
+    return value if isinstance(value, str) else None
+
+
+def _unique_prompt_output(task: str, obs: ObserveResult) -> str | None:
+    """任务明确索要提示文字且观察中唯一存在 [提示] 时，返回该提示。"""
+    if "提示文字" not in task:
+        return None
+    hints = _HINT_LINE_RE.findall(obs["visible_text_summary"])
+    return hints[0] if len(hints) == 1 else None
 
 
 class AgentController:
@@ -383,6 +407,16 @@ class AgentController:
         plan = await self.planner.plan(task, obs, history)
         action = await self.selector.select(plan, obs, history)
 
+        # 对“返回提示文字”的窄语义，Observer 已提供唯一的 [提示] 结构标注。
+        # 这里采用该确定性页面证据，避免模型把页面 title 当作提示文本。
+        if action["action"] == "done":
+            prompt_output = _unique_prompt_output(task, obs)
+            if prompt_output is not None:
+                action = LLMAction(
+                    action="done", selector=None, text=None, value=prompt_output,
+                    reason=action["reason"],
+                )
+
         # 确定性拦截：click 目标元素若在 observe() 结果里被标注为
         # role=select（原生 <select> 下拉框），直接判定这一步失败，不真的执行点击。
         if action["action"] == "click":
@@ -407,11 +441,12 @@ class AgentController:
                     "检测到重复的 extract 请求（页面状态与上次成功 extract 时"
                     "完全一致），跳过真实抽取调用，直接用缓存数据收尾任务。"
                 )
+                cached_output = _strict_scalar_extract_output(task, extract_cache["data"])
                 forced_done = LLMAction(
                     action="done",
                     selector=None,
                     text=None,
-                    value=json.dumps(extract_cache["data"], ensure_ascii=False),
+                    value=cached_output or json.dumps(extract_cache["data"], ensure_ascii=False),
                     reason=(
                         "系统检测到与上一次成功 extract 完全重复的请求"
                         "（页面状态未发生任何变化），数据已在上一步获取，"

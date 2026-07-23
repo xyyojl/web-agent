@@ -15,8 +15,10 @@ from agent.agent_controller import (
     _action_signature,
     _extract_page_key,
     _find_element_role,
+    _strict_scalar_extract_output,
     _strip_structural_prefix,
     _summarize_result,
+    _unique_prompt_output,
     _unwrap_extract_data,
 )
 from agent.config import AgentConfig
@@ -251,6 +253,52 @@ def test_unwrap_extract_data_none_when_data_key_missing():
 
 def test_unwrap_extract_data_none_when_not_a_dict():
     assert _unwrap_extract_data(json.dumps([1, 2, 3])) is None
+
+
+def test_strict_scalar_extract_output_unwraps_only_strict_single_field_data():
+    assert _strict_scalar_extract_output("原样返回命令", {"install_command": "pip install webagent"}) == "pip install webagent"
+    assert _strict_scalar_extract_output("返回命令", {"install_command": "pip install webagent"}) is None
+    assert _strict_scalar_extract_output("原样返回", {"command": "x", "version": "1"}) is None
+
+
+def test_unique_prompt_output_uses_only_one_observed_hint():
+    obs = _injection_obs("# 页面\n[提示] 跳转成功\n正文", status="clean")
+    assert _unique_prompt_output("返回跳转后显示的提示文字", obs) == "跳转成功"
+    assert _unique_prompt_output("返回标题", obs) is None
+    ambiguous = _injection_obs("[提示] A\n[提示] B", status="clean")
+    assert _unique_prompt_output("返回提示文字", ambiguous) is None
+
+
+async def test_run_step_extract_cache_unwraps_strict_scalar_output(tmp_path):
+    controller = _make_controller(tmp_path)
+    obs = _injection_obs("普通页面", status="clean")
+    controller.executor.page = MagicMock()
+    controller.observer.observe = AsyncMock(return_value=obs)
+    controller.planner.plan = AsyncMock(return_value="再次抽取")
+    controller.selector.select = AsyncMock(return_value={
+        "action": "extract", "selector": None, "text": None, "value": "命令", "reason": "抽取",
+    })
+    cache = {"page_key": (obs["url"], obs["text_hash"]), "data": {"install_command": "pip install webagent"}}
+    _, _, action, result, _, _ = await controller._run_step(1, "原样返回命令，只输出命令本身", [], cache)
+    assert action["action"] == "done"
+    assert action["value"] == "pip install webagent"
+    assert result["output"] == "pip install webagent"
+
+
+async def test_run_step_uses_unique_hint_for_prompt_text_task(tmp_path):
+    controller = _make_controller(tmp_path)
+    obs = _injection_obs("# 目标页\n[提示] 跳转成功", status="clean")
+    controller.executor.page = MagicMock()
+    controller.observer.observe = AsyncMock(return_value=obs)
+    controller.planner.plan = AsyncMock(return_value="已跳转")
+    controller.selector.select = AsyncMock(return_value={
+        "action": "done", "selector": None, "text": None, "value": "目标页标题", "reason": "完成",
+    })
+    controller.executor.execute = AsyncMock(return_value={"success": True, "page_changed": False, "output": "跳转成功", "error_msg": None})
+    _, _, action, result, _, _ = await controller._run_step(1, "返回跳转后显示的提示文字", [], None)
+    assert action["value"] == "跳转成功"
+    controller.executor.execute.assert_awaited_once_with(action, obs=obs)
+    assert result["output"] == "跳转成功"
 
 
 # ---------- _append_history ----------
