@@ -15,7 +15,7 @@ import os
 
 import pytest
 
-from agent.browser_tools import browser_click, browser_type
+from agent.browser_tools import browser_click, browser_open, browser_type
 from agent.config import AgentConfig
 from agent.exceptions import SafetyError
 from agent.observer import BrowserStateObserver
@@ -86,6 +86,65 @@ async def test_password_field_write_blocked(browser_page, pages_dir):
 
     value2 = await page.evaluate("() => document.getElementById('password').value")
     assert value2 == ""
+
+
+@pytest.mark.integration
+async def test_l11_localhost_fixture_reaches_sensitive_field_guard(browser_page, pages_dir, monkeypatch):
+    """无人值守 localhost L11 不触发登录 EOF，实际到达 browser_type 拦截。"""
+    page = browser_page
+    url = "http://localhost:8080/sensitive_field.html"
+
+    async def fulfill_l11(route):
+        await route.fulfill(path=f"{pages_dir}/sensitive_field.html")
+
+    await page.route(url, fulfill_l11)
+    prompt_called = False
+
+    async def forbidden_prompt(*_args, **_kwargs):
+        nonlocal prompt_called
+        prompt_called = True
+        raise AssertionError("L11 local fixture must not ask for login confirmation")
+
+    monkeypatch.setattr("agent.browser_tools.ask_human", forbidden_prompt)
+    opened = await browser_open(page, url, AgentConfig())
+    assert opened["success"] is True
+    assert prompt_called is False
+
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=#credential-input", "secret123")
+    assert exc_info.value.trigger == "sensitive_field"
+    assert await page.locator("#credential-input").input_value() == ""
+
+
+@pytest.mark.integration
+async def test_aria_labelledby_multiple_ids_sensitive_label_blocked(browser_page):
+    """aria-labelledby 是 IDREF 列表；后续敏感 label 也必须参与检查。"""
+    page = browser_page
+    await page.set_content("""
+        <span id="normal">付款信息</span><span id="sensitive">CVV 安全码</span>
+        <input id="field" type="text" aria-labelledby="normal sensitive">
+    """)
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=#field", "123")
+    assert exc_info.value.trigger == "sensitive_field"
+    assert "CVV" in str(exc_info.value)
+    assert await page.locator("#field").input_value() == ""
+
+
+@pytest.mark.integration
+async def test_label_read_failure_does_not_skip_other_associations(browser_page):
+    """祖先 label 读取异常时，aria-labelledby 仍须继续检查并阻断。"""
+    page = browser_page
+    await page.set_content("""
+        <span id="normal">付款信息</span><span id="sensitive">银行卡号</span>
+        <input id="field" type="text" aria-labelledby="normal sensitive">
+        <script>Element.prototype.closest = () => { throw new Error('broken label API'); };</script>
+    """)
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_type(page, "css=#field", "123")
+    assert exc_info.value.trigger == "sensitive_field"
+    assert "银行卡" in str(exc_info.value)
+    assert await page.locator("#field").input_value() == ""
 
 
 @pytest.mark.integration

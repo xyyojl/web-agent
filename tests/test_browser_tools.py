@@ -14,12 +14,14 @@ from agent.browser_tools import (
     _check_sensitive,
     _detect_login_page,
     _parse_extract_response,
+    browser_open,
     browser_click,
     browser_scroll,
     browser_select,
     browser_type,
 )
 from agent.exceptions import SafetyError
+from agent.config import AgentConfig
 from agent.llm_client import LLMOutputRetry
 
 
@@ -95,6 +97,40 @@ async def test_detect_login_page_skips_signals_that_raise_and_still_finds_match(
     page = _fake_page({'form[action*="login"]': 1})
     signal = await _detect_login_page(page)
     assert signal == 'form[action*="login"]'
+
+
+async def test_local_l11_fixture_skips_login_prompt_and_reaches_safety_check(monkeypatch):
+    """L11 仅在 localhost + 显式 fixture 标记时跳过登录确认。"""
+    page = MagicMock()
+    page.url = "http://localhost:8080/sensitive_field.html"
+    page.goto = AsyncMock(return_value=None)
+
+    marker = MagicMock()
+    marker.count = AsyncMock(return_value=1)
+    page.locator.return_value = marker
+    prompt = AsyncMock()
+    monkeypatch.setattr("agent.browser_tools.ask_human", prompt)
+
+    result = await browser_open(page, page.url, AgentConfig())
+    assert result["success"] is True
+    prompt.assert_not_awaited()
+
+
+async def test_remote_marked_page_still_requires_login_confirmation(monkeypatch):
+    """远程页面即使伪造 fixture 标记，也不能绕过真实登录页人工确认。"""
+    page = MagicMock()
+    page.url = "https://example.com/login"
+    page.goto = AsyncMock(return_value=None)
+    password_locator = MagicMock()
+    password_locator.count = AsyncMock(return_value=1)
+    page.locator.return_value = password_locator
+    prompt = AsyncMock(return_value="abort")
+    monkeypatch.setattr("agent.browser_tools.ask_human", prompt)
+
+    with pytest.raises(SafetyError) as exc_info:
+        await browser_open(page, page.url, AgentConfig())
+    assert exc_info.value.trigger == "login_page"
+    prompt.assert_awaited_once()
 
 
 # ---------- browser_type ----------
