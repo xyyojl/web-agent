@@ -18,6 +18,8 @@ class AgentConfig:
     rate_limit_delay:   int   = 60
     case_delay:         float = 0.0
     vision:             bool  = False
+    # 页面状态指纹可忽略的无关动态区域；默认空，保持保守语义。
+    noise_selectors:     tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
@@ -40,7 +42,11 @@ class AgentConfig:
             raw_value = os.environ.get(env_name)
             if raw_value is None:
                 continue
-            if field.type is bool:
+            if field.name == "noise_selectors":
+                overrides[field.name] = tuple(
+                    selector.strip() for selector in raw_value.split(",") if selector.strip()
+                )
+            elif field.type is bool:
                 overrides[field.name] = raw_value.strip().lower() in ("1", "true", "yes", "on")
             elif field.type in (int, float):
                 overrides[field.name] = field.type(raw_value)

@@ -107,6 +107,13 @@ async def test_verify_exact_with_prefix_fails(verifier):
     assert result["success"] is False
 
 
+async def test_l02_original_return_rejects_explanatory_prefix(verifier):
+    """DS-R1：L02“原样返回”不得接受前后说明。"""
+    case = _case(id="L02", task="找到命令，原样返回该命令", verify_mode="exact", expected_output="pip install webagent")
+    result = await verifier.verify(case, _agent_result(output="说明：应执行 pip install webagent 才能安装。"))
+    assert result["success"] is False
+
+
 async def test_verify_contains_success(verifier):
     case = _case(verify_mode="contains", expected_output="wor")
     result = await verifier.verify(case, _agent_result(output="hello world"))
@@ -417,28 +424,27 @@ async def test_verify_public_contains_failure_no_drift_hint(verifier):
 # ---------- [R1-1] verify_mode audit ----------
 
 _STRICT_KEYWORDS = ("只含", "禁止添加任何解释", "严格输出", "仅返回", "only return", "原样返回")
-_CONTAINS_EXEMPTIONS = {
-    "L02": "本地受控页面，expected_output 足够特异，contains 不会导致假阳性；设计决策保留以容忍格式差异",
-}
+_CONTAINS_EXEMPTIONS: dict[str, str] = {}
 
 
 def test_verify_mode_audit_no_strict_task_with_contains():
     """[R1-1] Automated check: task text with strict keywords must not use contains mode,
     unless explicitly exempted in _CONTAINS_EXEMPTIONS (documented in verify_mode_audit.md).
     """
-    project_root = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    case_dirs = [
+    project_root: str = str(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    case_dirs: list[str] = [
         os.path.join(project_root, "eval", "cases", "local"),
         os.path.join(project_root, "eval", "cases", "public"),
     ]
-    violations = []
+    violations: list[str] = []
     for case_dir in case_dirs:
         if not os.path.isdir(case_dir):
             continue
-        for fname in sorted(os.listdir(case_dir)):
+        entries: list[str] = sorted(os.listdir(case_dir))
+        for fname in entries:
             if not fname.endswith(".json"):
                 continue
-            path = os.path.join(case_dir, fname)
+            path: str = os.path.join(case_dir, fname)
             with open(path, mode="r", encoding="utf-8") as f:
                 case = json.load(f)
             task = case.get("task", "")

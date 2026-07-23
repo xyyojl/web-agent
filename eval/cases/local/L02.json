@@ -2,9 +2,9 @@
   "id": "L02",
   "type": "local",
   "task_type": "找安装命令",
-  "task": "找到页面上通过 pip 安装的命令，原样返回该命令",
+  "task": "找到页面上通过 pip 安装的命令，原样返回该命令；只输出命令本身，不要 Markdown 标记、引号或解释文字",
   "url": "http://localhost:8080/text_find.html",
   "expected_output": "pip install webagent",
-  "verify_mode": "contains",
+  "verify_mode": "exact",
   "difficulty": "low"
 }

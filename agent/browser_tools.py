@@ -71,6 +71,9 @@ LOGIN_SIGNALS = [
     'button:has-text("Sign in")',
 ]
 
+# browser_open 的超时重试是有界指数退避：1s、2s（默认 open_retry=2）。
+_OPEN_RETRY_BASE_DELAY_S = 1.0
+
 _SENSITIVE_RE = re.compile("|".join(SENSITIVE_PATTERNS), re.IGNORECASE)
 
 
@@ -252,8 +255,8 @@ async def browser_open(page, url: str, config: AgentConfig) -> ToolResult:
 
     页面加载/网络超时统一识别为 PlaywrightTimeoutError，包装为 BrowserError
     并记录 warning。超时属于典型的瞬时性故障（网络抖动、目标站点响应慢），
-    单次失败不代表页面真的打不开，因此这里按 config.open_retry 做少量重试
-    （固定 2s 间隔，不用指数退避——重试次数少，没必要让等待时间迅速拉长）；
+    单次失败不代表页面真的打不开，因此这里按 config.open_retry 做少量、有界的
+    指数退避重试（默认 1s、2s）；
     重试仍失败才返回 ToolResult(success=False, error_msg="timeout")。
     其他类型的错误（DNS 解析失败、证书错误等）大概率不是瞬时问题，重试
     也无济于事，不重试，直接返回失败并记录 error_msg。
@@ -278,11 +281,12 @@ async def browser_open(page, url: str, config: AgentConfig) -> ToolResult:
                 url,
                 config.browser_timeout,
                 browser_err,
-                "，2s 后重试" if will_retry else "，已达重试上限",
+                (f"，{_OPEN_RETRY_BASE_DELAY_S * (2 ** attempt):.0f}s 后退避重试"
+                 if will_retry else "，已达重试上限"),
                 exc_info=exc,
             )
             if will_retry:
-                await asyncio.sleep(2)
+                await asyncio.sleep(_OPEN_RETRY_BASE_DELAY_S * (2 ** attempt))
                 continue
             return ToolResult(
                 success=False,
@@ -328,11 +332,6 @@ async def browser_observe(page, observer: BrowserStateObserver) -> ObserveResult
         raise BrowserError("页面观察失败", action="observe") from exc
 
 
-# [Y1-1] 噪声内容排除列表：计算状态指纹前，从 document.body.innerText 中
-# 剔除这些 selector 对应的 DOM 区域（如时间戳、轮播图、广告位、埋点计数器）。
-# 默认为空（保守策略，不排除任何内容），避免引入假阳性。
-NOISE_SELECTORS: list[str] = []
-
 # [Y1-2] URL 未变化时，读取 after-fingerprint 前的短暂等待（毫秒），
 # 避免 SPA 异步渲染尚未完成就读取指纹导致假阴性。等待超时不算错误。
 _ASYNC_RENDER_WAIT_MS = 200
@@ -370,7 +369,9 @@ _GET_INNER_TEXT_JS = """
 """
 
 
-async def _compute_fingerprint(page) -> tuple[str, str] | None:
+async def _compute_fingerprint(
+    page, noise_selectors: tuple[str, ...] = ()
+) -> tuple[str, str] | None:
     """读取当前页面状态指纹 (url, sha256_of_innerText)。
 
     [Y1-1] noise_selectors 中的选择器对应区域会从 innerText 中剔除后再计算 hash。
@@ -378,7 +379,7 @@ async def _compute_fingerprint(page) -> tuple[str, str] | None:
     """
     try:
         url = page.url
-        inner_text = await page.evaluate(_GET_INNER_TEXT_JS, NOISE_SELECTORS)
+        inner_text = await page.evaluate(_GET_INNER_TEXT_JS, list(noise_selectors))
         text_hash = hashlib.sha256(inner_text.encode("utf-8")).hexdigest()
         return url, text_hash
     except PlaywrightError:
@@ -451,7 +452,8 @@ async def browser_click(
 
     # 点击前读取状态指纹（仅在确认有点击尝试时才读取，避免无 selector/text
     # 时的快速失败路径也触发 page.evaluate）
-    before_fp = await _compute_fingerprint(page)
+    noise_selectors = config.noise_selectors if config else ()
+    before_fp = await _compute_fingerprint(page, noise_selectors)
 
     last_error: Exception | None = None
     for level, attempt in attempts:
@@ -478,7 +480,7 @@ async def browser_click(
                 except PlaywrightError:
                     pass
 
-            after_fp = await _compute_fingerprint(page)
+            after_fp = await _compute_fingerprint(page, noise_selectors)
 
             if before_fp is not None and after_fp is not None:
                 page_changed = before_fp != after_fp

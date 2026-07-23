@@ -183,6 +183,9 @@ class AgentController:
         """
         self._task_id = task_id
         self._url = url
+        # task 中的密码/凭据值可能在当前 action.type 的 text 之前就被 Planner
+        # 复述；必须在任何 plan/reason 持久化之前登记进脱敏集合。
+        self.tracer.register_task_sensitive_values(task)
         # duration_s 从任务真正开始（含 open() 耗时）算到 _finalize() 落盘
         # 那一刻为止，覆盖整个任务生命周期，口径与 trace.jsonl 里逐步的
         # duration_ms（从 reset_step_timer() 之后才开始计）刻意不同——

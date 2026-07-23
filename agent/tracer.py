@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 
 from agent.types import AgentResult, ContentSafetyAssessment, LLMAction, ObserveResult, ToolResult
-from agent.privacy import redact_data, redact_text
+from agent.privacy import extract_sensitive_values, redact_data, redact_text
 
 # [Y3-2] Trace JSONL schema 版本号。v2 新增 observation 嵌套字段、
 # tool_output / tool_output_truncated / tool_output_sha256。
@@ -82,6 +82,10 @@ class TraceLogger:
         """登记 browser_type 输入，仅用于随后所有持久化字段的脱敏。"""
         if value:
             self._sensitive_values.add(value)
+
+    def register_task_sensitive_values(self, task: str) -> None:
+        """在 LLM 规划前登记任务中的敏感赋值，覆盖其后续的自由文本回显。"""
+        self._sensitive_values.update(extract_sensitive_values(task))
 
     def redact_for_persistence(self, value: str | None) -> str | None:
         return self._redact(value)

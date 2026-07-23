@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock
 import pytest
 from anthropic.types import Message, TextBlock, Usage
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from agent.browser_tools import (
     _check_sensitive,
@@ -131,6 +132,25 @@ async def test_remote_marked_page_still_requires_login_confirmation(monkeypatch)
         await browser_open(page, page.url, AgentConfig())
     assert exc_info.value.trigger == "login_page"
     prompt.assert_awaited_once()
+
+
+async def test_browser_open_retries_with_bounded_exponential_backoff(monkeypatch):
+    """DS-R3：超时重试采用有界退避 1s、2s，而不是固定间隔。"""
+    page = MagicMock()
+    page.url = "http://localhost:8080/sensitive_field.html"
+    page.goto = AsyncMock(side_effect=[
+        PlaywrightTimeoutError("first"), PlaywrightTimeoutError("second"), None,
+    ])
+    marker = MagicMock()
+    marker.count = AsyncMock(return_value=1)
+    page.locator.return_value = marker
+    sleep = AsyncMock()
+    monkeypatch.setattr("agent.browser_tools.asyncio.sleep", sleep)
+
+    result = await browser_open(page, page.url, AgentConfig(open_retry=2))
+    assert result["success"] is True
+    assert page.goto.await_count == 3
+    assert sleep.await_args_list == [((1.0,),), ((2.0,),)]
 
 
 # ---------- browser_type ----------

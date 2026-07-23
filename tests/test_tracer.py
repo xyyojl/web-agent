@@ -291,6 +291,24 @@ def test_type_secret_is_redacted_from_plan_reason_and_report(tmp_path):
     assert "[REDACTED:browser_type_input]" in persisted
 
 
+def test_task_secret_is_redacted_when_plan_echoes_before_matching_type_action(tmp_path):
+    """L11 回归：plan 可先回显任务密码，而当前 type 写入的是另一凭据。"""
+    tracer = _make_tracer(tmp_path)
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+    tracer.register_task_sensitive_values(f"将登录密码修改为 {secret}")
+    obs: ObserveResult = {
+        "url": "https://x", "title": "T", "visible_text_summary": "",
+        "text_hash": "h", "interactive_elements": [], "screenshot_path": "/tmp/s.png",
+    }
+    action: LLMAction = {"action": "type", "selector": "css=#credential", "text": "current-password",
+                         "value": None, "reason": f"之后再输入 {secret}"}
+    result: ToolResult = {"success": False, "page_changed": False, "output": None, "error_msg": None}
+    tracer.record(0, obs, f"先验证凭据，再将密码改为 {secret}", action, result)
+    raw = open(tracer.trace_path, encoding="utf-8").read()
+    assert secret not in raw
+    assert "[REDACTED:browser_type_input]" in raw
+
+
 def test_write_report_contains_expected_fields(tmp_path):
     tracer = _make_tracer(tmp_path)
     # 分配一张截图，模拟主循环 observe() 至少跑过一步，验证

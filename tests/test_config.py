@@ -69,6 +69,11 @@ def test_from_env_str_field_parsing(monkeypatch):
     assert config.model == "claude-test-model"
 
 
+def test_from_env_parses_noise_selectors(monkeypatch):
+    monkeypatch.setenv("WEBAGENT_NOISE_SELECTORS", " #ticker, .ad-slot ,, ")
+    assert AgentConfig.from_env().noise_selectors == ("#ticker", ".ad-slot")
+
+
 def test_from_env_unset_fields_keep_dataclass_defaults(monkeypatch):
     monkeypatch.setenv("WEBAGENT_MAX_STEPS", "3")
     config = AgentConfig.from_env()

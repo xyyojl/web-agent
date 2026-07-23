@@ -10,6 +10,13 @@ _SENSITIVE_ASSIGNMENT = re.compile(
 )
 
 
+def extract_sensitive_values(value: str | None) -> set[str]:
+    """从任务文本中提取敏感赋值，供后续 LLM 回显的持久化脱敏使用。"""
+    if not value:
+        return set()
+    return {match.group(2) for match in _SENSITIVE_ASSIGNMENT.finditer(value) if match.group(2)}
+
+
 def redact_text(value: str | None, secrets: set[str] | None = None) -> str | None:
     """返回可持久化文本，不保留 browser_type 输入值或任务中的敏感赋值。"""
     if value is None:

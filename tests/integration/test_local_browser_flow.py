@@ -54,6 +54,29 @@ async def test_tab_click_changes_dom_state(browser_page, pages_dir, config):
 
 
 @pytest.mark.integration
+async def test_dynamic_noise_is_ignored_when_configured(browser_page, pages_dir):
+    """无关动态区域更新不应被误记为业务页面变化。"""
+    page = browser_page
+    await page.goto(f"file://{pages_dir}/dynamic_noise.html")
+    config = AgentConfig(noise_selectors=("#dynamic-noise",))
+
+    result = await browser_click(page, selector="css=#noise-refresh", config=config)
+    assert result["success"] is True
+    assert result["page_changed"] is False
+    assert await page.locator("#noise-value").inner_text() == "刷新计数：1"
+
+
+@pytest.mark.integration
+async def test_dynamic_noise_remains_visible_by_default(browser_page, pages_dir):
+    """默认空配置保持保守：未声明为噪声的变化仍算页面变化。"""
+    page = browser_page
+    await page.goto(f"file://{pages_dir}/dynamic_noise.html")
+    result = await browser_click(page, selector="css=#noise-refresh", config=AgentConfig())
+    assert result["success"] is True
+    assert result["page_changed"] is True
+
+
+@pytest.mark.integration
 async def test_password_field_write_blocked(browser_page, pages_dir):
     """正向验证：sensitive_field.html 中 type=password 字段写入被阻断。
 

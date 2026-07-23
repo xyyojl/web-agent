@@ -140,6 +140,8 @@ uv run python main.py --task "找到页面上的版本号" --url "http://localho
 
 > 💡 未显式传入的参数会退回 `AgentConfig.from_env()`，即优先读取 `.env` 里的 `WEBAGENT_*` 环境变量（完整列表见 `.env.example`），最后才是 dataclass 默认值——命令行参数 > 环境变量 > 默认值。
 
+页面状态指纹默认不排除任何内容。仅当已确认某区域是无关动态噪声时，可通过逗号分隔的 `WEBAGENT_NOISE_SELECTORS` 配置（例如 `#ticker,.ad-slot`）将其排除；未知区域不应加入该列表。
+
 更多示例：
 ```bash
 uv run python main.py --task "..." --url "https://example.com" --vision

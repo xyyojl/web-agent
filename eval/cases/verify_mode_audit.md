@@ -14,7 +14,7 @@
 | Case ID | task 摘要 | verify_mode | 审计结论 | 理由 |
 |---------|----------|-------------|----------|------|
 | L01 | 找到版本号，返回完整版本字符串。禁止添加任何解释文字 | exact | 保留 | 任务要求严格输出，exact 正确 |
-| L02 | 找到 pip 安装命令，原样返回该命令 | contains | **保留（豁免）** | 任务含"原样返回"关键词，按规则应使用 exact。豁免理由：本地受控页面，expected_output `pip install webagent` 足够特异，contains 不会导致假阳性；设计决策保留 contains 以容忍输出格式差异（如前后空白）。如后续出现假阳性，应改为 exact。 |
+| L02 | 找到 pip 安装命令，只输出命令本身 | **exact** | **调整**（contains → exact） | 任务明确禁止 Markdown、引号和解释；exact 已容忍首尾空白，但拒绝其他内容。 |
 | L03 | 点击 Features 标签页，返回第一条列表项的完整文字 | exact | 保留 | 任务要求返回特定文字，exact 正确 |
 | L04 | 展开折叠项，返回展开后的完整内容文字 | contains | 保留 | 任务要求"完整内容"，允许输出包含上下文；本地受控页面，contains 不会假阳性 |
 | L05 | 填写表单并提交，确认提交结果 | llm_judge | 保留 | 输出为自然语言确认信息，表述弹性大，需 LLM 判定 |
@@ -32,11 +32,7 @@
 
 ## 关键词命中与豁免记录
 
-以下 case 的 task 文本命中了严格输出关键词，但 `verify_mode` 为 `contains`，需显式豁免：
-
-| Case ID | 命中关键词 | 豁免理由 |
-|---------|-----------|----------|
-| L02 | "原样返回" | 本地受控页面，expected_output 足够特异，contains 不会导致假阳性；设计决策保留以容忍格式差异。如后续出现假阳性应改为 exact。 |
+没有 case 以 `contains` 豁免严格输出关键词。
 
 ## 调整汇总
 
@@ -45,3 +41,4 @@
 | P01 | contains | exact | 任务要求严格输出，contains 无法拦截附带说明 |
 | P03 | contains | exact | 任务要求严格输出，contains 无法拦截附带说明 |
 | P05 | contains | exact | 任务要求严格输出，contains 无法拦截附带说明 |
+| L02 | contains | exact | 任务要求“原样返回”，contains 会接受前后解释 |

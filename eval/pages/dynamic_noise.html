@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>动态噪声状态页</title></head>
+<body>
+  <main id="business-content">
+    <h1>订单概览</h1>
+    <p>业务状态保持不变。</p>
+    <button id="business-button" type="button">查看详情</button>
+  </main>
+  <aside id="dynamic-noise" aria-live="polite">
+    <span id="noise-value">刷新计数：0</span>
+    <button id="noise-refresh" type="button">刷新状态</button>
+  </aside>
+  <script>
+    let count = 0;
+    document.getElementById('noise-refresh').addEventListener('click', () => {
+      count += 1;
+      document.getElementById('noise-value').textContent = `刷新计数：${count}`;
+    });
+  </script>
+</body>
+</html>
