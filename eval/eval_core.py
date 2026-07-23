@@ -480,8 +480,8 @@ def render_artifact_summary(
     generated_at = provenance["generated_at"]
     date_str = generated_at[:10]
     lines.append(f"# Eval Artifact Summary — {date_str}")
-    lines.append(f"`generated_at`: {generated_at}")
-    lines.append(f"`git_commit`: {provenance.get('git_commit') or 'unknown'}")
+    lines.append(f"- `generated_at`: {generated_at}")
+    lines.append(f"- `git_commit`: {provenance.get('git_commit') or 'unknown'}")
     lines.append("")
 
     # 指标表格（与 eval_summary.md 格式一致）

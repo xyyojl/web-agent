@@ -475,11 +475,11 @@ def render_ablation_summary(
     generated_at = payload["generated_at"]
     date_str = generated_at[:10]
     lines.append(f"# Ablation Artifact Summary — {date_str}")
-    lines.append(f"`generated_at`: {generated_at}")
-    lines.append(f"`git_commit`: {payload.get('git_commit') or 'unknown'}")
-    lines.append(f"`model`: {payload.get('model')}")
-    lines.append(f"`prompt_fingerprint`: {payload.get('prompt_fingerprint')}")
-    lines.append(f"`run_count_per_group`: {payload.get('run_count_per_group')}")
+    lines.append(f"- `generated_at`: {generated_at}")
+    lines.append(f"- `git_commit`: {payload.get('git_commit') or 'unknown'}")
+    lines.append(f"- `model`: {payload.get('model')}")
+    lines.append(f"- `prompt_fingerprint`: {payload.get('prompt_fingerprint')}")
+    lines.append(f"- `run_count_per_group`: {payload.get('run_count_per_group')}")
     lines.append("")
 
     # 对比表
