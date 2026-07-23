@@ -52,3 +52,6 @@ eval/ablation_results.json
 # eval/artifacts/ 下的 ablation-<date>/ 和 <date>-local-public/ 均可纳入 Git
 !eval/artifacts/
 !eval/artifacts/**
+
+# .DS_Store 仍需忽略（不受上面白名单影响）
+eval/artifacts/**/.DS_Store
