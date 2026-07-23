@@ -646,6 +646,7 @@ async def main_async(
     run_count: int,
     exclude_from_avg: list[str],
 ) -> None:
+    git_commit, git_dirty = _get_git_info() if artifact_dir else (None, False)
     case_ids = [c.strip() for c in case_arg.split(",") if c.strip()] if case_arg else None
     cases = _select_cases(suite_arg, case_ids)
     if not cases:
@@ -697,7 +698,8 @@ async def main_async(
     )
 
     # DS-W2: 构建 provenance 字段
-    git_commit, git_dirty = _get_git_info()
+    if not artifact_dir:
+        git_commit, git_dirty = _get_git_info()
     prompt_fingerprint = _compute_prompt_fingerprint(SAMPLING_PARAMS)
 
     included_case_ids = sorted(included_set)

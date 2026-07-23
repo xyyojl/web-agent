@@ -106,13 +106,17 @@ async def test_artifact_generation_with_mock(tmp_path):
     mock_fn, _ = _mock_run_one_case_factory()
     with patch("eval.run_ablation.run_one_case", new_callable=AsyncMock, side_effect=mock_fn):
         with patch("eval.run_ablation._RESULTS_PATH", results_path):
-            await run_ablation.main_async(
-                suite_arg="local",
-                case_arg=None,
-                artifact_dir=artifact_dir,
-                run_count=1,
-                exclude_from_avg=["L11"],
-            )
+            # 两组运行写 trace 后，仍应使用运行开始时采集的工作区状态。
+            with patch("eval.run_ablation._get_git_info", return_value=("start-sha", False)) as git_info:
+                await run_ablation.main_async(
+                    suite_arg="local",
+                    case_arg=None,
+                    artifact_dir=artifact_dir,
+                    run_count=1,
+                    exclude_from_avg=["L11"],
+                )
+
+    git_info.assert_called_once_with()
 
     # 验证 artifact 文件存在
     assert os.path.isfile(os.path.join(artifact_dir, "ablation_results.json"))
@@ -120,6 +124,9 @@ async def test_artifact_generation_with_mock(tmp_path):
 
     with open(os.path.join(artifact_dir, "ablation_results.json"), encoding="utf-8") as f:
         payload = json.load(f)
+
+    assert payload["git_commit"] == "start-sha"
+    assert payload["git_dirty"] is False
 
     # 验证 artifact_format_version
     assert payload["artifact_format_version"] == 1

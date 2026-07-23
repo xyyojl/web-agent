@@ -91,12 +91,16 @@ async def test_artifact_generation_with_mock(tmp_path):
     mock_outcome = _make_outcome()
     with patch("eval.run_eval.run_one_case", new_callable=AsyncMock, return_value=mock_outcome):
         with patch("eval.run_eval._SUMMARY_PATH", str(tmp_path / "eval_summary.md")):
-            await run_eval.main_async(
-                suite_arg="local",
-                case_arg=None,
-                artifact_dir=artifact_dir,
-                archive_case_ids=None,
-            )
+            # 运行本身可创建未跟踪 trace；artifact 应记录运行开始时的快照。
+            with patch("eval.run_eval._get_git_info", return_value=("start-sha", False)) as git_info:
+                await run_eval.main_async(
+                    suite_arg="local",
+                    case_arg=None,
+                    artifact_dir=artifact_dir,
+                    archive_case_ids=None,
+                )
+
+    git_info.assert_called_once_with()
 
     assert os.path.isfile(os.path.join(artifact_dir, "summary.md"))
     assert os.path.isfile(os.path.join(artifact_dir, "results.json"))
@@ -107,6 +111,10 @@ async def test_artifact_generation_with_mock(tmp_path):
         results = json.load(f)
     # local suite 有 11 个 case (L01-L11)
     assert len(results["cases"]) == 11
+    with open(os.path.join(artifact_dir, "provenance.json"), encoding="utf-8") as f:
+        provenance = json.load(f)
+    assert provenance["git_commit"] == "start-sha"
+    assert provenance["git_dirty"] is False
 
 
 async def test_trace_archived_with_mock(tmp_path):

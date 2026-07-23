@@ -609,6 +609,7 @@ def write_artifact(
     suite_arg: str,
     case_arg: str | None,
     archive_case_ids: list[str] | None,
+    git_info: tuple[str | None, bool] | None = None,
 ) -> None:
     """DS-R3: 生成可提交的评测 artifact。
 
@@ -641,8 +642,7 @@ def write_artifact(
             for outcome in all_outcomes[suite]:
                 case_ids.append(outcome.case.get("id", "?"))
 
-    # 获取 git 信息 [R3-2]
-    git_commit, git_dirty = _get_git_info()
+    git_commit, git_dirty = git_info if git_info is not None else _get_git_info()
 
     # 先预检归档输入；这一步不得创建最终 artifact 目录。
     if archive_case_ids:

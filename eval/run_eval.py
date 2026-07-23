@@ -42,6 +42,7 @@ from eval.eval_core import (  #（sys.path 必须先于这行执行）
     EvalCase,
     _METRIC_ORDER,
     _SUITE_LABELS,
+    _get_git_info,
     compute_metrics,
     load_cases,
     run_one_case,
@@ -181,6 +182,7 @@ async def main_async(
     artifact_dir: str | None = None,
     archive_case_ids: list[str] | None = None,
 ) -> None:
+    git_info = _get_git_info() if artifact_dir else None
     config = AgentConfig.from_env()
 
     all_outcomes: dict[str, list[CaseOutcome]] = {}
@@ -264,6 +266,7 @@ async def main_async(
                 suite_arg=suite_arg,
                 case_arg=case_arg,
                 archive_case_ids=archive_case_ids,
+                git_info=git_info,
             )
             print(f"artifact 已生成: {os.path.abspath(artifact_dir)}")
         except ArtifactError as exc:
