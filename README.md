@@ -200,7 +200,12 @@ uv run pytest tests/ -q --cov=agent --cov=eval --cov-report=term-missing
 - `provenance.json`：运行参数、模型信息、git commit 等溯源信息
 - `traces/<case_id>/`：归档的 trace 文件（仅 `--archive-case-traces` 指定的代表 case）
 
-当前没有可引用的“最新可信” artifact：此前的 `2026-07-21-local-public` 与 `ablation-20260721` 包含敏感测试输入，已从当前工作树移除且不再作为基准。修复后的代码通过 L11 自动 eval 后，必须重新运行生成替代 artifact；不会通过手改旧结果掩盖泄露。
+当前可信评测 artifact（`generated_at`: `2026-07-23T09:19:31.091472+00:00`）：
+
+- [artifact 目录](eval/artifacts/20260723-local-public)
+- [汇总报告](eval/artifacts/20260723-local-public/summary.md)
+- [结构化结果](eval/artifacts/20260723-local-public/results.json)
+- [运行溯源](eval/artifacts/20260723-local-public/provenance.json)
 
 运行过程中的 `trace.jsonl`、`report.json` 以及视觉快照会落在 `traces/run-<timestamp>/` 下。持久化层会清除 `browser_type` 输入值及其在 task/plan/reason 等字段的回显；这保留必要的操作和页面证据，但不保留原始敏感输入。
 

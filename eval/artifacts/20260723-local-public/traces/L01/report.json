@@ -1,0 +1,14 @@
+{
+  "run_id": "run-20260723-171439-efb48a95",
+  "task_id": "L01",
+  "task": "找到页面上的版本号，返回完整版本字符串。最终答案必须严格满足任务要求，禁止添加任何解释文字",
+  "url": "http://localhost:8080/text_find.html",
+  "success": true,
+  "output": "v2.3.1",
+  "steps": 1,
+  "duration_s": 8.35,
+  "fail_reason": null,
+  "trace_file": "traces/run-20260723-171439-efb48a95/trace.jsonl",
+  "last_screenshot": "traces/run-20260723-171439-efb48a95/step-001.png",
+  "privacy_redaction_version": 1
+}

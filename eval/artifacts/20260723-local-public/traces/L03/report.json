@@ -1,0 +1,14 @@
+{
+  "run_id": "run-20260723-171454-08e65a4c",
+  "task_id": "L03",
+  "task": "点击 Features 标签页，返回该标签页下显示的第一条列表项的完整文字",
+  "url": "http://localhost:8080/tab_nav.html",
+  "success": true,
+  "output": "结构化页面观察，不传完整 HTML",
+  "steps": 3,
+  "duration_s": 13.66,
+  "fail_reason": null,
+  "trace_file": "traces/run-20260723-171454-08e65a4c/trace.jsonl",
+  "last_screenshot": "traces/run-20260723-171454-08e65a4c/step-003.png",
+  "privacy_redaction_version": 1
+}
