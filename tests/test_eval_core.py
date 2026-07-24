@@ -431,6 +431,43 @@ def test_render_artifact_summary_no_warning_when_clean():
     assert "工作区状态提示" not in summary
 
 
+def test_artifact_summary_redacts_failed_task(tmp_path):
+    """失败摘要需脱敏任务和失败原因，同时保留普通失败证据。"""
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+    sensitive = _outcome(
+        case=_case(id="L01", task=f"将登录密码修改为 {secret}，然后保存"),
+        agent_result=_agent_result(
+            task=f"将登录密码修改为 {secret}，然后保存",
+            success=False,
+            fail_reason=f"保存 {secret} 时被拒绝",
+        ),
+        verify_success=False,
+        steps_records=[{"screenshot": "step-sensitive.png"}],
+    )
+    ordinary = _outcome(
+        case=_case(id="L02", task="点击取消按钮"),
+        agent_result=_agent_result(success=False, fail_reason="element_not_found"),
+        verify_success=False,
+        steps_records=[{"screenshot": "step-ordinary.png"}],
+    )
+    all_outcomes = {"local": [sensitive, ordinary]}
+    artifact_dir = str(tmp_path / "redacted-artifact")
+
+    write_artifact(
+        artifact_dir, all_outcomes, {"local": compute_metrics([sensitive, ordinary])},
+        AgentConfig(), "local", None, None,
+    )
+
+    summary = open(os.path.join(artifact_dir, "summary.md"), encoding="utf-8").read()
+    results = json.loads(open(os.path.join(artifact_dir, "results.json"), encoding="utf-8").read())
+    assert secret not in summary
+    assert "[REDACTED:browser_type_input]" in summary
+    assert "| L01 |" in summary
+    assert "step-sensitive.png" in summary
+    assert "| L02 | 点击取消按钮 | element_not_found | step-ordinary.png |" in summary
+    assert results["cases"][0]["succeeded"] is False
+
+
 def test_write_artifact_generates_all_files(tmp_path):
     """DS-R3 正向: write_artifact must generate summary.md, results.json, provenance.json."""
     artifact_dir = str(tmp_path / "test-artifact")

@@ -36,7 +36,7 @@ from agent import (
     Verifier,
     VerifyResult,
 )
-from agent.privacy import redact_data
+from agent.privacy import extract_sensitive_values, redact_data, redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -507,8 +507,21 @@ def render_artifact_summary(
                 continue
             case_id = outcome.case.get("id", "?")
             task = outcome.case.get("task", "")
+            fail_reason = outcome.display_fail_reason
+            # CaseOutcome 不持有 TraceLogger 的运行时登记表，因此从 artifact
+            # 边界可见的任务/失败文本中提取敏感赋值，并将同一组值用于两列。
+            # 这既能清洗“密码修改为 <值>”本身，也能清洗失败原因对该值的
+            # 裸回显；具体识别规则统一由 agent/privacy.py 维护。
+            sensitive_values = extract_sensitive_values(task)
+            if outcome.agent_result:
+                sensitive_values.update(
+                    extract_sensitive_values(outcome.agent_result.get("task"))
+                )
+            sensitive_values.update(extract_sensitive_values(fail_reason))
+            task = redact_text(task, sensitive_values) or ""
+            fail_reason = redact_text(fail_reason, sensitive_values) or "unknown"
             failed_rows.append(
-                f"| {case_id} | {task} | {outcome.display_fail_reason} | {outcome.last_screenshot} |"
+                f"| {case_id} | {task} | {fail_reason} | {outcome.last_screenshot} |"
             )
     lines.extend(failed_rows if failed_rows else ["| - | 无失败任务 | - | - |"])
 
