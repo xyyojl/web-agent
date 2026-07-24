@@ -45,6 +45,7 @@ from eval.eval_core import (  #（sys.path 必须先于这行执行）
     _get_git_info,
     compute_metrics,
     load_cases,
+    redact_outcome_failure_fields,
     run_one_case,
     write_artifact,
 )
@@ -90,9 +91,9 @@ def _render_summary_md(
             if outcome.succeeded:
                 continue
             case_id = outcome.case.get("id", "?")
-            task = outcome.case.get("task", "")
+            task, fail_reason = redact_outcome_failure_fields(outcome)
             failed_rows.append(
-                f"| {case_id} | {task} | {outcome.display_fail_reason} | {outcome.last_screenshot} |"
+                f"| {case_id} | {task} | {fail_reason} | {outcome.last_screenshot} |"
             )
 
     lines.extend(failed_rows if failed_rows else ["| - | 无失败任务 | - | - |"])

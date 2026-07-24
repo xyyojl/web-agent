@@ -461,6 +461,7 @@ def test_artifact_summary_redacts_failed_task(tmp_path):
     summary = open(os.path.join(artifact_dir, "summary.md"), encoding="utf-8").read()
     results = json.loads(open(os.path.join(artifact_dir, "results.json"), encoding="utf-8").read())
     assert secret not in summary
+    assert secret not in json.dumps(results, ensure_ascii=False)
     assert "[REDACTED:browser_type_input]" in summary
     assert "| L01 |" in summary
     assert "step-sensitive.png" in summary

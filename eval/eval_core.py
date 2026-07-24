@@ -106,6 +106,25 @@ class CaseOutcome:
         return "unknown"
 
 
+def outcome_sensitive_values(outcome: CaseOutcome) -> set[str]:
+    """收集 artifact 边界可见的敏感赋值，供同一 outcome 的字段共同脱敏。"""
+    task = outcome.case.get("task", "")
+    fail_reason = outcome.display_fail_reason
+    values = extract_sensitive_values(task)
+    if outcome.agent_result:
+        values.update(extract_sensitive_values(outcome.agent_result.get("task")))
+    values.update(extract_sensitive_values(fail_reason))
+    return values
+
+
+def redact_outcome_failure_fields(outcome: CaseOutcome) -> tuple[str, str]:
+    """返回可安全持久化的失败任务与失败原因，保留普通文本。"""
+    sensitive_values = outcome_sensitive_values(outcome)
+    task = redact_text(outcome.case.get("task", ""), sensitive_values) or ""
+    fail_reason = redact_text(outcome.display_fail_reason, sensitive_values) or "unknown"
+    return task, fail_reason
+
+
 def load_cases(suite_dir: str) -> list[EvalCase]:
     """加载指定目录下的全部 *.json case 文件，按文件名排序。
 
@@ -400,13 +419,14 @@ def _build_case_record(outcome: CaseOutcome, suite: str) -> dict:
     last_screenshot = outcome.last_screenshot
     if last_screenshot == "N/A":
         last_screenshot = None
+    sensitive_values = outcome_sensitive_values(outcome)
     return {
         "case_id": outcome.case.get("id", "?"),
         "suite": suite,
         "succeeded": outcome.succeeded,
-        "agent_result": redact_data(outcome.agent_result),
-        "verify_result": redact_data(outcome.verify_result),
-        "crash_reason": redact_data(outcome.crash_reason),
+        "agent_result": redact_data(outcome.agent_result, sensitive_values),
+        "verify_result": redact_data(outcome.verify_result, sensitive_values),
+        "crash_reason": redact_data(outcome.crash_reason, sensitive_values),
         "last_screenshot": last_screenshot,
         "trace_dir": outcome.agent_result["trace_dir"] if outcome.agent_result else None,
     }
@@ -506,20 +526,7 @@ def render_artifact_summary(
             if outcome.succeeded:
                 continue
             case_id = outcome.case.get("id", "?")
-            task = outcome.case.get("task", "")
-            fail_reason = outcome.display_fail_reason
-            # CaseOutcome 不持有 TraceLogger 的运行时登记表，因此从 artifact
-            # 边界可见的任务/失败文本中提取敏感赋值，并将同一组值用于两列。
-            # 这既能清洗“密码修改为 <值>”本身，也能清洗失败原因对该值的
-            # 裸回显；具体识别规则统一由 agent/privacy.py 维护。
-            sensitive_values = extract_sensitive_values(task)
-            if outcome.agent_result:
-                sensitive_values.update(
-                    extract_sensitive_values(outcome.agent_result.get("task"))
-                )
-            sensitive_values.update(extract_sensitive_values(fail_reason))
-            task = redact_text(task, sensitive_values) or ""
-            fail_reason = redact_text(fail_reason, sensitive_values) or "unknown"
+            task, fail_reason = redact_outcome_failure_fields(outcome)
             failed_rows.append(
                 f"| {case_id} | {task} | {fail_reason} | {outcome.last_screenshot} |"
             )

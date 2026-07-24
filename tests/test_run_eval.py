@@ -117,6 +117,34 @@ async def test_artifact_generation_with_mock(tmp_path):
     assert provenance["git_dirty"] is False
 
 
+def test_default_summary_redacts_failed_task():
+    """默认 eval_summary.md 与 artifact 使用相同的失败行脱敏规则。"""
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+    sensitive = _make_outcome(case_id="L01", succeeded=False)
+    sensitive.case["task"] = f"将登录密码修改为 {secret}，然后保存"
+    assert sensitive.agent_result is not None
+    sensitive.agent_result["task"] = sensitive.case["task"]
+    sensitive.agent_result["fail_reason"] = f"保存 {secret} 时被拒绝"
+    sensitive.step_records = [{"screenshot": "step-sensitive.png"}]
+
+    ordinary = _make_outcome(case_id="L02", succeeded=False)
+    ordinary.case["task"] = "点击取消按钮"
+    assert ordinary.agent_result is not None
+    ordinary.agent_result["fail_reason"] = "element_not_found"
+    ordinary.step_records = [{"screenshot": "step-ordinary.png"}]
+
+    summary = run_eval._render_summary_md(
+        {"local": run_eval.compute_metrics([sensitive, ordinary])},
+        {"local": [sensitive, ordinary]},
+    )
+
+    assert secret not in summary
+    assert "[REDACTED:browser_type_input]" in summary
+    assert "| L01 |" in summary
+    assert "step-sensitive.png" in summary
+    assert "| L02 | 点击取消按钮 | element_not_found | step-ordinary.png |" in summary
+
+
 async def test_trace_archived_with_mock(tmp_path):
     """正向验证: --archive-case-traces L01 → trace 文件被复制且路径存在。"""
     # 创建 fake trace 目录

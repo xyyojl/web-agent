@@ -162,6 +162,52 @@ async def test_artifact_generation_with_mock(tmp_path):
     assert payload["run_count_per_group"] == 1
 
 
+async def test_ablation_results_redact_failed_task(tmp_path):
+    """本地结果与 artifact 都不能保留失败任务中的敏感值。"""
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+    artifact_dir = str(tmp_path / "ablation-redacted")
+    results_path = str(tmp_path / "ablation_results.json")
+
+    async def _mock(case, _config):
+        outcome = _make_outcome(case_id=case["id"], succeeded=False)
+        assert outcome.agent_result is not None
+        if case["id"] == "L01":
+            outcome.case["task"] = f"将登录密码修改为 {secret}，然后保存"
+            outcome.agent_result["task"] = outcome.case["task"]
+            outcome.agent_result["fail_reason"] = f"保存 {secret} 时被拒绝"
+        else:
+            outcome.case["task"] = "点击取消按钮"
+            outcome.agent_result["task"] = "点击取消按钮"
+            outcome.agent_result["fail_reason"] = "element_not_found"
+        return outcome
+
+    with patch("eval.run_ablation.run_one_case", new_callable=AsyncMock, side_effect=_mock):
+        with patch("eval.run_ablation._RESULTS_PATH", results_path):
+            await run_ablation.main_async(
+                suite_arg="local",
+                case_arg="L01,L02",
+                artifact_dir=artifact_dir,
+                run_count=1,
+                exclude_from_avg=[],
+            )
+
+    artifact_results = os.path.join(artifact_dir, "ablation_results.json")
+    for path in (results_path, artifact_results):
+        text = open(path, encoding="utf-8").read()
+        assert secret not in text
+        assert "[REDACTED:browser_type_input]" in text
+
+    payload = json.loads(open(artifact_results, encoding="utf-8").read())
+    for group in payload["groups"].values():
+        l01 = next(case for case in group["cases"] if case["case_id"] == "L01")
+        l02 = next(case for case in group["cases"] if case["case_id"] == "L02")
+        assert "[REDACTED:browser_type_input]" in l01["task"]
+        assert "[REDACTED:browser_type_input]" in l01["runs"][0]["fail_reason"]
+        assert l01["runs"][0]["success"] is False
+        assert l02["task"] == "点击取消按钮"
+        assert l02["runs"][0]["fail_reason"] == "element_not_found"
+
+
 async def test_l11_not_in_avg_steps(tmp_path):
     """正向验证: L11 运行但不参与 avg_steps。
 

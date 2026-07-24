@@ -45,6 +45,8 @@ from eval.eval_core import (  #（sys.path 必须先于这行执行）
     compute_raw_metrics,
     _get_git_info,
     load_cases,
+    outcome_sensitive_values,
+    redact_outcome_failure_fields,
     run_one_case,
 )
 from agent.types import EvalCase
@@ -188,13 +190,15 @@ def _single_run_record(outcome: CaseOutcome, run_index: int) -> dict:
     """
     agent_result = outcome.agent_result
     verify_result = outcome.verify_result
+    _, fail_reason = redact_outcome_failure_fields(outcome)
+    sensitive_values = outcome_sensitive_values(outcome)
     return {
         "run_index": run_index,
         "success": outcome.succeeded,
         "steps": agent_result["steps"] if agent_result else None,
         "trace_dir": agent_result["trace_dir"] if agent_result else None,
-        "fail_reason": None if outcome.succeeded else outcome.display_fail_reason,
-        "verify_result": verify_result,
+        "fail_reason": None if outcome.succeeded else fail_reason,
+        "verify_result": redact_data(verify_result, sensitive_values),
         "verify_confidence": verify_result["confidence"] if verify_result else None,
     }
 
@@ -210,9 +214,10 @@ def _case_record(
     逐次记录该 case 每次运行的完整结果。报告中展示的均值/成功率等聚合指标
     必须能从 runs[] 原始数据重新计算得出。
     """
+    safe_task, _ = redact_outcome_failure_fields(runs_outcomes[-1])
     return {
         "case_id": case.get("id", "?"),
-        "task": case.get("task", ""),
+        "task": safe_task,
         "excluded": excluded,
         "runs": [
             _single_run_record(outcome, run_idx)
