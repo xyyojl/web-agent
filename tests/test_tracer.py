@@ -268,6 +268,48 @@ def test_record_type_action_text_not_in_trace(tmp_path):
     assert "text" not in row  # no top-level text field
 
 
+def test_observation_redacts_typed_value(tmp_path):
+    """browser_type 后页面回显的敏感值不能进入下一条 observation。"""
+    tracer = _make_tracer(tmp_path)
+    secret = "TEST_PASSWORD_DO_NOT_USE"
+    initial_obs: ObserveResult = {
+        "url": "https://x", "title": "Account", "visible_text_summary": "",
+        "text_hash": "before-hash", "interactive_elements": [], "screenshot_path": "/tmp/1.png",
+    }
+    type_action: LLMAction = {
+        "action": "type", "selector": "css=#password", "text": secret,
+        "value": None, "reason": "填写密码",
+    }
+    result: ToolResult = {"success": True, "page_changed": True, "error_msg": None, "output": None}
+    tracer.record(0, initial_obs, "填写表单", type_action, result)
+
+    echoed_obs: ObserveResult = {
+        "url": "https://x", "title": f"已保存 {secret}",
+        "visible_text_summary": f"当前值：{secret}；提交成功",
+        "text_hash": "after-hash",
+        "interactive_elements": [
+            {"role": "button", "name": f"确认 {secret}", "selector": "css=#confirm", "href": None},
+        ],
+        "screenshot_path": "/tmp/2.png",
+    }
+    click_action: LLMAction = {
+        "action": "click", "selector": "css=#confirm", "text": None,
+        "value": None, "reason": "确认",
+    }
+    tracer.record(1, echoed_obs, "确认保存结果", click_action, result)
+
+    raw = open(tracer.trace_path, encoding="utf-8").read()
+    rows = [json.loads(line) for line in raw.splitlines()]
+    observation = rows[1]["observation"]
+
+    assert secret not in raw
+    assert observation["title"] == "已保存 [REDACTED:browser_type_input]"
+    assert observation["visible_text_summary"] == "当前值：[REDACTED:browser_type_input]；提交成功"
+    assert observation["interactive_elements"][0]["name"] == "确认 [REDACTED:browser_type_input]"
+    assert observation["text_hash"] == "after-hash"
+    assert observation["interactive_elements"][0]["selector"] == "css=#confirm"
+
+
 def test_type_secret_is_redacted_from_plan_reason_and_report(tmp_path):
     """持久化边界不能只省略 action.text：LLM 回显也必须被清洗。"""
     tracer = _make_tracer(tmp_path)

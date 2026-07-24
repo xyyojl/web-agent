@@ -180,10 +180,15 @@ class TraceLogger:
             "trace_schema_version": _TRACE_SCHEMA_VERSION,
             "privacy_redaction_version": _PRIVACY_REDACTION_VERSION,
             "observation": {
-                "title": obs.get("title"),
+                # 页面可能把 browser_type 输入回显到 DOM；保留观察结构和
+                # 非敏感证据，只替换其中的敏感文本值。text_hash 是不可逆摘要，
+                # 直接保留以维持页面状态证据的可复核性。
+                "title": self._redact(obs.get("title")),
                 "text_hash": obs.get("text_hash"),
-                "visible_text_summary": obs.get("visible_text_summary"),
-                "interactive_elements": obs.get("interactive_elements"),
+                "visible_text_summary": self._redact(obs.get("visible_text_summary")),
+                "interactive_elements": redact_data(
+                    obs.get("interactive_elements"), self._sensitive_values,
+                ),
             },
             "tool_output": tool_output,
             "tool_output_truncated": tool_output_truncated,
